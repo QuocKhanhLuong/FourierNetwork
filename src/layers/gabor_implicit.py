@@ -427,7 +427,289 @@ class ImplicitSegmentationHead(nn.Module):
         return logits
 
 
-if __name__ == "__main__":
+class FiLMLayer(nn.Module):
+    """
+    Feature-wise Linear Modulation (FiLM) Layer.
+    
+    Applies affine transformation conditioned on input features:
+        output = γ(features) × input + β(features)
+    
+    This allows the network to dynamically adjust activations based on context.
+    
+    Args:
+        feature_dim: Dimension of conditioning features
+        modulation_dim: Dimension of signal to modulate
+    """
+    
+    def __init__(self, feature_dim: int, modulation_dim: int):
+        super().__init__()
+        
+        # Predict scale (γ) and shift (β) from features
+        self.gamma_proj = nn.Linear(feature_dim, modulation_dim)
+        self.beta_proj = nn.Linear(feature_dim, modulation_dim)
+        
+        # Initialize to identity transform
+        nn.init.ones_(self.gamma_proj.weight.data[:modulation_dim, :modulation_dim // feature_dim + 1])
+        nn.init.zeros_(self.gamma_proj.bias.data)
+        nn.init.zeros_(self.beta_proj.weight.data)
+        nn.init.zeros_(self.beta_proj.bias.data)
+    
+    def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        """
+        Apply FiLM modulation.
+        
+        Args:
+            x: Input tensor to modulate (..., modulation_dim)
+            condition: Conditioning features (..., feature_dim)
+            
+        Returns:
+            Modulated tensor (..., modulation_dim)
+        """
+        gamma = self.gamma_proj(condition)  # Scale
+        beta = self.beta_proj(condition)    # Shift
+        
+        return gamma * x + beta
+
+
+class EnergyGatedGaborImplicit(nn.Module):
+    """
+    Energy-Gated Gabor Implicit Neural Representation for Fine Segmentation.
+    
+    Key features:
+    1. Gabor/Raised Cosine basis encoding (prevents Gibbs ringing)
+    2. FiLM conditioning (feature-dependent modulation)
+    3. Physics Gating (output × energy_map to suppress flat regions)
+    
+    The energy gating ensures:
+    - High energy (boundaries): Full implicit output for sharp details
+    - Low energy (flat): Suppressed output to avoid artifacts
+    
+    Architecture:
+        coords → Gabor Encoding → FiLM(features) → MLP → × Energy → Output
+    
+    Args:
+        feature_dim: Dimension of input features
+        num_classes: Number of output classes
+        hidden_dim: Hidden layer dimension
+        num_layers: Number of MLP layers
+        num_frequencies: Number of Gabor basis functions
+        use_gabor: Use Gabor (True) or Fourier (False) basis
+        omega_0: SIREN frequency parameter
+    """
+    
+    def __init__(self, feature_dim: int, num_classes: int,
+                 hidden_dim: int = 256, num_layers: int = 4,
+                 num_frequencies: int = 64, use_gabor: bool = True,
+                 omega_0: float = 30.0):
+        super().__init__()
+        
+        self.feature_dim = feature_dim
+        self.num_classes = num_classes
+        self.hidden_dim = hidden_dim
+        
+        # Coordinate encoder (Gabor or Fourier)
+        if use_gabor:
+            self.coord_encoder = GaborBasis(
+                input_dim=2, num_frequencies=num_frequencies, learnable=True
+            )
+        else:
+            self.coord_encoder = FourierFeatures(
+                input_dim=2, num_frequencies=num_frequencies, learnable=False
+            )
+        
+        coord_encoded_dim = self.coord_encoder.output_dim
+        
+        # FiLM layers for feature conditioning
+        self.film_layers = nn.ModuleList([
+            FiLMLayer(feature_dim, hidden_dim)
+            for _ in range(num_layers - 1)
+        ])
+        
+        # MLP decoder with SIREN layers
+        self.input_proj = SIRENLayer(coord_encoded_dim, hidden_dim, omega_0, is_first=True)
+        
+        self.hidden_layers = nn.ModuleList([
+            SIRENLayer(hidden_dim, hidden_dim, omega_0, is_first=False)
+            for _ in range(num_layers - 2)
+        ])
+        
+        # Output layer (linear, no sine)
+        self.output_proj = nn.Linear(hidden_dim, num_classes)
+        
+        # Energy gating parameters
+        self.gate_scale = nn.Parameter(torch.ones(1))
+        self.gate_bias = nn.Parameter(torch.zeros(1))
+    
+    def forward(self, coords: torch.Tensor, features: torch.Tensor,
+                energy: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with FiLM conditioning and energy gating.
+        
+        Args:
+            coords: Query coordinates (B, N, 2) in [-1, 1]
+            features: Conditioning features (B, N, feature_dim)
+            energy: Energy values at query points (B, N, 1) in [0, 1]
+            
+        Returns:
+            Gated output logits (B, N, num_classes)
+        """
+        # 1. Encode coordinates with Gabor basis
+        coord_enc = self.coord_encoder(coords)  # (B, N, coord_encoded_dim)
+        
+        # 2. Initial projection
+        x = self.input_proj(coord_enc)  # (B, N, hidden_dim)
+        
+        # 3. Process through FiLM-modulated layers
+        for i, (hidden_layer, film_layer) in enumerate(
+            zip(self.hidden_layers, self.film_layers[:-1])
+        ):
+            # Apply SIREN layer
+            x = hidden_layer(x)
+            # Apply FiLM modulation
+            x = film_layer(x, features)
+        
+        # Final FiLM modulation
+        if len(self.film_layers) > 0:
+            x = self.film_layers[-1](x, features)
+        
+        # 4. Output projection
+        logits = self.output_proj(x)  # (B, N, num_classes)
+        
+        # 5. Physics Gating
+        # Scale energy with learnable parameters
+        gate = torch.sigmoid(energy * self.gate_scale + self.gate_bias)  # (B, N, 1)
+        
+        # Apply gating
+        gated_logits = logits * gate  # (B, N, num_classes)
+        
+        return gated_logits
+
+
+class EnergyGatedImplicitHead(nn.Module):
+    """
+    Complete Energy-Gated Implicit Segmentation Head.
+    
+    Wraps EnergyGatedGaborImplicit with feature sampling from encoder output.
+    
+    Args:
+        feature_channels: Number of channels in input feature map
+        num_classes: Number of output classes
+        hidden_dim: Hidden dimension
+        num_layers: Number of MLP layers
+        num_frequencies: Number of Gabor frequencies
+    """
+    
+    def __init__(self, feature_channels: int, num_classes: int,
+                 hidden_dim: int = 256, num_layers: int = 4,
+                 num_frequencies: int = 64):
+        super().__init__()
+        
+        self.num_classes = num_classes
+        
+        # Feature projection
+        self.feature_proj = nn.Sequential(
+            nn.Conv2d(feature_channels, hidden_dim, kernel_size=1),
+            nn.GroupNorm(min(32, hidden_dim), hidden_dim),
+            nn.GELU()
+        )
+        
+        # Implicit decoder with energy gating
+        self.implicit_decoder = EnergyGatedGaborImplicit(
+            feature_dim=hidden_dim,
+            num_classes=num_classes,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_frequencies=num_frequencies,
+            use_gabor=True
+        )
+    
+    def sample_at_coords(self, feature_map: torch.Tensor,
+                        energy_map: torch.Tensor,
+                        coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample features and energy at given coordinates.
+        
+        Args:
+            feature_map: (B, C, H, W)
+            energy_map: (B, 1, H, W)
+            coords: (B, N, 2) in [-1, 1]
+            
+        Returns:
+            Tuple of (features, energy) both of shape (B, N, C)
+        """
+        B, C, H, W = feature_map.shape
+        N = coords.shape[1]
+        
+        grid = coords.view(B, 1, N, 2)
+        
+        # Sample features
+        features = F.grid_sample(
+            feature_map, grid, mode='bilinear',
+            padding_mode='border', align_corners=True
+        ).squeeze(2).permute(0, 2, 1)  # (B, N, C)
+        
+        # Sample energy
+        energy = F.grid_sample(
+            energy_map, grid, mode='bilinear',
+            padding_mode='border', align_corners=True
+        ).squeeze(2).permute(0, 2, 1)  # (B, N, 1)
+        
+        return features, energy
+    
+    def forward(self, feature_map: torch.Tensor,
+                energy_map: torch.Tensor,
+                coords: Optional[torch.Tensor] = None,
+                output_size: Optional[Tuple[int, int]] = None) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            feature_map: Feature tensor (B, C, H, W)
+            energy_map: Energy map (B, 1, H, W)
+            coords: Optional query coordinates (B, N, 2)
+            output_size: Optional output size (H, W)
+            
+        Returns:
+            Segmentation logits (B, num_classes, H, W) or (B, N, num_classes)
+        """
+        B, C, H_feat, W_feat = feature_map.shape
+        device = feature_map.device
+        
+        # Project features
+        feature_map = self.feature_proj(feature_map)
+        
+        # Generate grid if no coords provided
+        if coords is None:
+            if output_size is None:
+                output_size = (H_feat * 4, W_feat * 4)
+            
+            H_out, W_out = output_size
+            
+            y = torch.linspace(-1, 1, H_out, device=device)
+            x = torch.linspace(-1, 1, W_out, device=device)
+            yy, xx = torch.meshgrid(y, x, indexing='ij')
+            coords = torch.stack([xx, yy], dim=-1).view(1, -1, 2).expand(B, -1, -1)
+            
+            reshape_output = True
+        else:
+            reshape_output = False
+            H_out, W_out = None, None
+        
+        # Sample features and energy
+        features, energy = self.sample_at_coords(feature_map, energy_map, coords)
+        
+        # Implicit decoding with energy gating
+        logits = self.implicit_decoder(coords, features, energy)
+        
+        # Reshape if needed
+        if reshape_output:
+            logits = logits.view(B, H_out, W_out, self.num_classes)
+            logits = logits.permute(0, 3, 1, 2)
+        
+        return logits
+
+
+
     print("Testing Gabor Implicit Modules...")
     
     # Test Gabor Basis

@@ -341,7 +341,244 @@ class BoundaryAwareLoss(nn.Module):
         return weighted_loss.mean()
 
 
-if __name__ == "__main__":
+class EyeOpeningLoss(nn.Module):
+    """
+    Eye Opening Loss (Entropy Minimization at Boundaries).
+    
+    Based on the Eye Diagram concept from telecommunications:
+    - Clear "eye" opening = decisive predictions (0 or 1)
+    - Closed "eye" = uncertain predictions (~0.5)
+    
+    This loss penalizes predictions near 0.5 at boundary regions,
+    forcing the model to make decisive (sharp) boundary predictions.
+    
+    L_eye = 4 × p × (1 - p)
+    
+    This reaches maximum (1.0) when p=0.5 and minimum (0.0) when p=0 or p=1.
+    
+    Features:
+    - Warm-up scheduling: Only activates after N epochs
+    - Annealing: Weight gradually increases to prevent early destabilization
+    - Boundary focus: Optionally weight by energy/boundary map
+    
+    Args:
+        warmup_epochs: Number of epochs before activating this loss
+        max_weight: Maximum weight for this loss component
+        anneal_rate: Rate of weight increase per epoch after warm-up
+        smooth: Smoothing constant for numerical stability
+    """
+    
+    def __init__(self, warmup_epochs: int = 5, max_weight: float = 0.1,
+                 anneal_rate: float = 0.02, smooth: float = 1e-7):
+        super().__init__()
+        self.warmup_epochs = warmup_epochs
+        self.max_weight = max_weight
+        self.anneal_rate = anneal_rate
+        self.smooth = smooth
+    
+    def get_weight(self, epoch: int) -> float:
+        """
+        Compute loss weight based on current epoch.
+        
+        Args:
+            epoch: Current training epoch (0-indexed)
+            
+        Returns:
+            Loss weight (0 during warm-up, then annealed up to max_weight)
+        """
+        if epoch < self.warmup_epochs:
+            return 0.0
+        return min(self.max_weight, self.anneal_rate * (epoch - self.warmup_epochs))
+    
+    def forward(self, logits: torch.Tensor, 
+                energy_map: Optional[torch.Tensor] = None,
+                epoch: int = 0) -> torch.Tensor:
+        """
+        Compute Eye Opening Loss.
+        
+        Args:
+            logits: Prediction logits of shape (B, C, H, W) or (B, N, C)
+            energy_map: Optional energy map (B, 1, H, W) to focus on boundaries
+            epoch: Current training epoch for weight scheduling
+            
+        Returns:
+            Scalar eye opening loss
+        """
+        # Get weight for current epoch
+        weight = self.get_weight(epoch)
+        
+        if weight <= 0:
+            return torch.tensor(0.0, device=logits.device, requires_grad=False)
+        
+        # Convert logits to probabilities
+        if logits.dim() == 4:
+            # (B, C, H, W) -> softmax over classes
+            probs = torch.softmax(logits, dim=1)
+            # For multi-class, we want high confidence for ANY class
+            # Maximum probability per pixel (how confident the prediction is)
+            max_probs = probs.max(dim=1, keepdim=True)[0]  # (B, 1, H, W)
+        else:
+            # (B, N, C) -> softmax over classes
+            probs = torch.softmax(logits, dim=-1)
+            max_probs = probs.max(dim=-1, keepdim=True)[0]  # (B, N, 1)
+        
+        # Eye opening: penalize uncertainty (probs near 0.5)
+        # L = 4 × p × (1 - p), maximizes at p=0.5
+        eye_loss = 4 * max_probs * (1 - max_probs)
+        
+        # Apply energy weighting (focus on boundaries) if provided
+        if energy_map is not None:
+            if energy_map.shape[-2:] != eye_loss.shape[-2:]:
+                energy_map = F.interpolate(
+                    energy_map, size=eye_loss.shape[-2:],
+                    mode='bilinear', align_corners=True
+                )
+            eye_loss = eye_loss * energy_map
+        
+        # Return weighted mean
+        return weight * eye_loss.mean()
+
+
+class EGMCombinedLoss(nn.Module):
+    """
+    Combined Loss for EGM-Net Training.
+    
+    Combines:
+    1. Coarse Loss: Dice + CE for the coarse segmentation
+    2. Fine Loss: BCE/CE for point-sampled fine predictions
+    3. Eye Opening Loss: Entropy minimization at boundaries (with warm-up)
+    4. Consistency Loss: Agreement between coarse and fine branches
+    
+    Args:
+        dice_weight: Weight for Dice loss
+        ce_weight: Weight for CrossEntropy loss
+        fine_weight: Weight for fine branch loss
+        eye_weight: Max weight for Eye Opening loss
+        consistency_weight: Weight for coarse-fine consistency
+        eye_warmup: Epochs before activating Eye Opening loss
+    """
+    
+    def __init__(self, dice_weight: float = 1.0, ce_weight: float = 1.0,
+                 fine_weight: float = 1.0, eye_weight: float = 0.1,
+                 consistency_weight: float = 0.1, eye_warmup: int = 5):
+        super().__init__()
+        
+        self.dice_weight = dice_weight
+        self.ce_weight = ce_weight
+        self.fine_weight = fine_weight
+        self.eye_weight = eye_weight
+        self.consistency_weight = consistency_weight
+        
+        # Loss components
+        self.dice_loss = DiceLoss()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.eye_loss = EyeOpeningLoss(
+            warmup_epochs=eye_warmup, 
+            max_weight=eye_weight,
+            anneal_rate=0.02
+        )
+    
+    def forward(self, outputs: dict, target: torch.Tensor,
+                point_logits: Optional[torch.Tensor] = None,
+                point_labels: Optional[torch.Tensor] = None,
+                epoch: int = 0) -> dict:
+        """
+        Compute combined loss.
+        
+        Args:
+            outputs: Model outputs dict with 'coarse', 'fine', 'energy'
+            target: Ground truth mask (B, H, W)
+            point_logits: Optional point predictions (B, N, C)
+            point_labels: Optional point labels (B, N)
+            epoch: Current training epoch
+            
+        Returns:
+            Dict with 'total' loss and individual components
+        """
+        losses = {}
+        
+        # 1. Coarse branch losses
+        coarse = outputs.get('coarse', outputs.get('output'))
+        
+        # Resize target if needed
+        if coarse.shape[-2:] != target.shape[-2:]:
+            target_resized = F.interpolate(
+                target.unsqueeze(1).float(),
+                size=coarse.shape[-2:],
+                mode='nearest'
+            ).squeeze(1).long()
+        else:
+            target_resized = target.long()
+        
+        dice = self.dice_loss(coarse, target_resized)
+        ce = self.ce_loss(coarse, target_resized)
+        
+        losses['dice'] = dice
+        losses['ce'] = ce
+        
+        coarse_loss = self.dice_weight * dice + self.ce_weight * ce
+        
+        # 2. Fine branch loss (point-based if available)
+        fine_loss = torch.tensor(0.0, device=coarse.device)
+        if point_logits is not None and point_labels is not None:
+            # Point-based cross-entropy
+            B, N, C = point_logits.shape
+            point_logits_flat = point_logits.view(B * N, C)
+            point_labels_flat = point_labels.view(B * N)
+            fine_loss = F.cross_entropy(point_logits_flat, point_labels_flat)
+            losses['fine'] = fine_loss
+        elif 'fine' in outputs:
+            # Use spatial fine output
+            fine = outputs['fine']
+            if fine.shape[-2:] != target_resized.shape[-2:]:
+                target_for_fine = F.interpolate(
+                    target_resized.unsqueeze(1).float(),
+                    size=fine.shape[-2:],
+                    mode='nearest'
+                ).squeeze(1).long()
+            else:
+                target_for_fine = target_resized
+            fine_loss = self.ce_loss(fine, target_for_fine)
+            losses['fine'] = fine_loss
+        
+        # 3. Eye Opening Loss (with warm-up)
+        energy_map = outputs.get('energy', None)
+        if 'fine' in outputs:
+            eye = self.eye_loss(outputs['fine'], energy_map, epoch)
+        else:
+            eye = self.eye_loss(coarse, energy_map, epoch)
+        losses['eye'] = eye
+        
+        # 4. Consistency Loss (coarse and fine should agree)
+        consistency_loss = torch.tensor(0.0, device=coarse.device)
+        if 'fine' in outputs and self.consistency_weight > 0:
+            fine = outputs['fine']
+            if fine.shape[-2:] != coarse.shape[-2:]:
+                fine_resized = F.interpolate(
+                    fine, size=coarse.shape[-2:],
+                    mode='bilinear', align_corners=True
+                )
+            else:
+                fine_resized = fine
+            
+            # KL divergence for consistency
+            coarse_probs = F.log_softmax(coarse, dim=1)
+            fine_probs = F.softmax(fine_resized, dim=1)
+            consistency_loss = F.kl_div(coarse_probs, fine_probs, reduction='batchmean')
+            losses['consistency'] = consistency_loss
+        
+        # Total loss
+        total = (coarse_loss + 
+                 self.fine_weight * fine_loss + 
+                 eye + 
+                 self.consistency_weight * consistency_loss)
+        
+        losses['total'] = total
+        
+        return losses
+
+
+
     # Test losses
     batch_size, num_classes, height, width = 2, 3, 64, 64
     
