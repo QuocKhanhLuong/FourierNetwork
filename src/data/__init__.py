@@ -1,7 +1,6 @@
-"""Data loading and preprocessing utilities."""
 
 from .data_utils import (
-    MedicalImageSegmentationDataset, 
+    MedicalImageSegmentationDataset,
     MetricsCalculator,
     MonogenicDataset,
     JointVectorRotation,
@@ -9,7 +8,7 @@ from .data_utils import (
 )
 
 __all__ = [
-    'MedicalImageSegmentationDataset', 
+    'MedicalImageSegmentationDataset',
     'MetricsCalculator',
     'MonogenicDataset',
     'JointVectorRotation',

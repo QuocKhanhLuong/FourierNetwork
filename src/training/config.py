@@ -1,22 +1,10 @@
-"""
-Configuration Classes for Spec-VMamba Training.
-
-Provides dataclass-based configurations for model architecture, loss functions,
-and training hyperparameters. Uses nested configurations for modularity.
-
-References:
-    [1] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
-    [2] Ronneberger et al., "U-Net: Convolutional Networks for Biomedical
-        Image Segmentation," MICCAI, 2015.
-"""
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-
 @dataclass
 class ModelConfig:
-    """Configuration for SpectralVMUNet model."""
+
     in_channels: int = 1
     out_channels: int = 3
     img_size: int = 256
@@ -24,52 +12,41 @@ class ModelConfig:
     num_stages: int = 4
     depth: int = 2
 
-
 @dataclass
 class LossConfig:
-    """Configuration for loss functions."""
+
     spatial_weight: float = 1.0
     freq_weight: float = 0.1
     use_dice: bool = True
     use_focal: bool = True
-    boundary_weight: float = 0.0  # 0 to disable boundary loss
-
+    boundary_weight: float = 0.0
 
 @dataclass
 class TrainingConfig:
-    """Configuration for training."""
-    # Model
+
     model: ModelConfig = ModelConfig()
-    
-    # Loss
+
     loss: LossConfig = LossConfig()
-    
-    # Optimizer
+
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
-    optimizer: str = "adamw"  # "adamw" or "sgd"
-    
-    # Training
+    optimizer: str = "adamw"
+
     num_epochs: int = 100
     batch_size: int = 8
     num_workers: int = 4
-    
-    # Learning rate schedule
+
     warmup_epochs: int = 10
-    scheduler: str = "cosine"  # "cosine", "step", or "exponential"
-    
-    # Checkpointing
+    scheduler: str = "cosine"
+
     checkpoint_dir: str = "./checkpoints"
-    save_interval: int = 10  # Save every N epochs
-    
-    # Device
+    save_interval: int = 10
+
     device: str = "cuda"
     mixed_precision: bool = False
-    
-    # Logging
-    log_interval: int = 100  # Log every N iterations
-    val_interval: int = 1  # Validate every N epochs
 
+    log_interval: int = 100
+    val_interval: int = 1
 
 if __name__ == "__main__":
     config = TrainingConfig()

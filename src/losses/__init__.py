@@ -1,20 +1,19 @@
-"""Loss functions for medical image segmentation."""
 
 from .physics_loss import (
-    DiceLoss, 
-    FocalLoss, 
+    DiceLoss,
+    FocalLoss,
     FrequencyLoss,
-    SpectralDualLoss, 
+    SpectralDualLoss,
     BoundaryAwareLoss,
     EyeOpeningLoss,
     EGMCombinedLoss
 )
 
 __all__ = [
-    'DiceLoss', 
-    'FocalLoss', 
+    'DiceLoss',
+    'FocalLoss',
     'FrequencyLoss',
-    'SpectralDualLoss', 
+    'SpectralDualLoss',
     'BoundaryAwareLoss',
     'EyeOpeningLoss',
     'EGMCombinedLoss'

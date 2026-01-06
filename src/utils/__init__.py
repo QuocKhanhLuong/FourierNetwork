@@ -1,4 +1,3 @@
-"""Utility modules for EGM-Net."""
 
 from .metrics import SegmentationMetrics, count_parameters, dice_score, iou_score
 from .visualize import (
@@ -13,12 +12,12 @@ from .visualize import (
 )
 
 __all__ = [
-    # Metrics
+
     'SegmentationMetrics',
     'count_parameters',
     'dice_score',
     'iou_score',
-    # Visualization
+
     'plot_segmentation_result',
     'plot_training_curves',
     'plot_confusion_matrix',

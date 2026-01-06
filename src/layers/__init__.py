@@ -1,10 +1,9 @@
-"""Building block layers for network architectures."""
 
 from .spectral_layers import SpectralGating
 from .monogenic import EnergyMap, MonogenicSignal, RieszTransform
 from .gabor_implicit import (
-    GaborBasis, 
-    GaborNet, 
+    GaborBasis,
+    GaborNet,
     ImplicitSegmentationHead,
     FiLMLayer,
     EnergyGatedGaborImplicit,

@@ -1,4 +1,3 @@
-"""Model architectures for medical image segmentation."""
 
 from .egm_net import EGMNet, EGMNetLite
 from .mamba_block import VSSBlock, MambaBlockStack, DirectionalScanner
