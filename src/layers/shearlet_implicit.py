@@ -34,7 +34,7 @@ class ShearletBasis(nn.Module):
         self.num_orientations = num_orientations
         self.base_freq = base_freq
         
-        angles = torch.linspace(0, math.pi, num_orientations, endpoint=False)
+        angles = torch.linspace(0, math.pi * (num_orientations - 1) / num_orientations, num_orientations)
         self.register_buffer('base_angles', angles)
 
     def forward(self, coords, freq, scale_x, scale_y, shear):
