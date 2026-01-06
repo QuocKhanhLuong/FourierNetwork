@@ -421,7 +421,15 @@ def parse_args():
     parser.add_argument('--test', action='store_true',
                        help='Run quick test with dummy data')
 
+    parser.add_argument('--use_mamba', action='store_true', default=True)
+    parser.add_argument('--no_mamba', dest='use_mamba', action='store_false')
+    parser.add_argument('--use_spectral', action='store_true', default=True)
+    parser.add_argument('--no_spectral', dest='use_spectral', action='store_false')
+    parser.add_argument('--use_fine_head', action='store_true', default=True)
+    parser.add_argument('--no_fine_head', dest='use_fine_head', action='store_false')
+
     return parser.parse_args()
+
 
 def main():
 
@@ -474,9 +482,9 @@ def main():
             num_classes=args.num_classes,
             img_size=args.img_size,
             use_hrnet=True,
-            use_mamba=True,
-            use_spectral=True,
-            use_fine_head=True
+            use_mamba=args.use_mamba,
+            use_spectral=args.use_spectral,
+            use_fine_head=args.use_fine_head
         )
 
     params = sum(p.numel() for p in model.parameters())

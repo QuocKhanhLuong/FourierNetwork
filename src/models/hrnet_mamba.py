@@ -1,8 +1,7 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict
+from typing import Dict, List, Tuple
 import math
 
 try:
@@ -13,347 +12,275 @@ except (ImportError, ValueError):
         from models.mamba_block import VSSBlock, MambaBlockStack
         from layers.spectral_layers import SpectralGating
     except ImportError:
-        try:
-            import sys
-            import os
+        import sys, os
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from models.mamba_block import VSSBlock, MambaBlockStack
+        from layers.spectral_layers import SpectralGating
 
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            src_dir = os.path.dirname(current_dir)
-            if src_dir not in sys.path:
-                sys.path.append(src_dir)
 
-            from models.mamba_block import VSSBlock, MambaBlockStack
-            from layers.spectral_layers import SpectralGating
-        except ImportError as e:
-            raise ImportError(f"Could not import required modules (mamba_block, spectral_layers): {e}")
+class BasicBlock(nn.Module):
+    expansion = 1
 
-class SpectralVSSBlock(nn.Module):
-
-    def __init__(self, channels: int, height: int, width: int,
-                 mamba_depth: int = 2, expansion_ratio: float = 2.0,
-                 spectral_threshold: float = 0.1,
-                 use_mamba: bool = True, use_spectral: bool = True):
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
         super().__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, 3, stride, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
 
-        self.channels = channels
-        self.height = height
-        self.width = width
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample:
+            residual = self.downsample(x)
+        return self.relu(out + residual)
+
+
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super().__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.downsample:
+            residual = self.downsample(x)
+        return self.relu(out + residual)
+
+
+class MambaBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None,
+                 use_mamba=True, use_spectral=True, height=64, width=64):
+        super().__init__()
         self.use_mamba = use_mamba
         self.use_spectral = use_spectral
 
-        if use_mamba and mamba_depth > 0:
-            self.vss_blocks = MambaBlockStack(
-                channels,
-                depth=mamba_depth,
-                expansion_ratio=expansion_ratio,
-                scan_dim=min(64, channels)
+        if stride != 1 or inplanes != planes:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(inplanes, planes, 1, stride, bias=False),
+                nn.BatchNorm2d(planes)
             )
         else:
+            self.downsample = downsample
 
-            self.vss_blocks = nn.Sequential(
-                nn.Conv2d(channels, channels, 3, padding=1, bias=False),
-                nn.GroupNorm(min(32, channels), channels),
-                nn.GELU(),
-                nn.Conv2d(channels, channels, 3, padding=1, bias=False),
-                nn.GroupNorm(min(32, channels), channels),
-                nn.GELU()
+        if use_mamba:
+            self.mamba = MambaBlockStack(planes, depth=2, expansion_ratio=2.0, scan_dim=min(64, planes))
+        else:
+            self.mamba = nn.Sequential(
+                nn.Conv2d(planes, planes, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(planes),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(planes, planes, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(planes)
             )
 
         if use_spectral:
-            self.spectral_gate = SpectralGating(
-                channels, height, width,
-                threshold=spectral_threshold,
-                complex_init="kaiming"
-            )
-        else:
-            self.spectral_gate = None
-
-        if use_mamba and use_spectral:
+            self.spectral = SpectralGating(planes, height, width, threshold=0.1, complex_init="kaiming")
             self.fusion_weight = nn.Parameter(torch.tensor(0.5))
         else:
+            self.spectral = None
             self.fusion_weight = None
 
-        self.norm = nn.GroupNorm(min(32, channels), channels)
+        self.proj = nn.Conv2d(inplanes, planes, 1, stride, bias=False) if (stride != 1 or inplanes != planes) else nn.Identity()
+        self.bn = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
+        residual = self.proj(x)
 
-        spatial_out = self.vss_blocks(x)
+        out = self.mamba(residual)
 
-        if self.use_spectral and self.spectral_gate is not None:
-            spectral_out = self.spectral_gate(x)
+        if self.spectral is not None:
+            spec_out = self.spectral(residual)
+            w = torch.sigmoid(self.fusion_weight)
+            out = w * out + (1 - w) * spec_out
 
-            if self.fusion_weight is not None:
-                weight = torch.sigmoid(self.fusion_weight)
-                output = weight * spatial_out + (1 - weight) * spectral_out
-            else:
-                output = (spatial_out + spectral_out) / 2.0
-        else:
+        out = self.bn(out)
+        return self.relu(out + residual)
 
-            output = spatial_out
-
-        output = self.norm(output)
-
-        return output
-
-class MultiScaleFusion(nn.Module):
-
-    def __init__(self, high_channels: int, low_channels: int, scale_factor: int = 2):
-        super().__init__()
-
-        self.scale_factor = scale_factor
-
-        self.high_to_low = nn.Sequential(
-            nn.Conv2d(high_channels, low_channels, kernel_size=3,
-                     stride=scale_factor, padding=1, bias=False),
-            nn.GroupNorm(min(32, low_channels), low_channels),
-            nn.GELU()
-        )
-
-        self.low_to_high = nn.Sequential(
-            nn.Upsample(scale_factor=scale_factor, mode='bilinear', align_corners=True),
-            nn.Conv2d(low_channels, high_channels, kernel_size=1, bias=False),
-            nn.GroupNorm(min(32, high_channels), high_channels),
-            nn.GELU()
-        )
-
-        self.high_gate = nn.Parameter(torch.ones(1) * 0.5)
-        self.low_gate = nn.Parameter(torch.ones(1) * 0.5)
-
-    def forward(self, high_feat: torch.Tensor,
-                low_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        high_to_low = self.high_to_low(high_feat)
-
-        low_to_high = self.low_to_high(low_feat)
-
-        h_gate = torch.sigmoid(self.high_gate)
-        l_gate = torch.sigmoid(self.low_gate)
-
-        new_high = high_feat + h_gate * low_to_high
-        new_low = low_feat + l_gate * high_to_low
-
-        return new_high, new_low
-
-class HRNetStage(nn.Module):
-
-    def __init__(self, channels: int, height: int, width: int,
-                 num_blocks: int = 2, mamba_depth: int = 2,
-                 use_mamba: bool = True, use_spectral: bool = True):
-        super().__init__()
-
-        self.blocks = nn.ModuleList([
-            SpectralVSSBlock(
-                channels, height, width,
-                mamba_depth=mamba_depth,
-                use_mamba=use_mamba,
-                use_spectral=use_spectral
-            )
-            for _ in range(num_blocks)
-        ])
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        for block in self.blocks:
-            x = block(x)
-        return x
 
 class HRNetStem(nn.Module):
-
-    def __init__(self, in_channels: int = 3, out_channels: int = 64, stride: int = 4):
+    def __init__(self, in_ch=3, out_ch=64):
         super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, 64, 3, 2, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, out_ch, 3, 2, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
 
-        mid_channels = out_channels // 2
-
-        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=3,
-                              stride=2, padding=1, bias=False)
-        self.norm1 = nn.GroupNorm(min(32, mid_channels), mid_channels)
-        self.act1 = nn.GELU()
-
-        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=3,
-                              stride=2, padding=1, bias=False)
-        self.norm2 = nn.GroupNorm(min(32, out_channels), out_channels)
-        self.act2 = nn.GELU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        x = self.act1(self.norm1(self.conv1(x)))
-        x = self.act2(self.norm2(self.conv2(x)))
+    def forward(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
         return x
 
-class AggregationLayer(nn.Module):
 
-    def __init__(self, high_channels: int, low_channels: int,
-                 out_channels: int, scale_factor: int = 2):
+class FuseLayer(nn.Module):
+    def __init__(self, in_channels_list, out_channels_list):
         super().__init__()
+        self.num_in = len(in_channels_list)
+        self.num_out = len(out_channels_list)
+        self.fuse = nn.ModuleList()
 
-        self.scale_factor = scale_factor
+        for j in range(self.num_out):
+            fuse_j = nn.ModuleList()
+            for i in range(self.num_in):
+                if i == j:
+                    fuse_j.append(nn.Identity())
+                elif i < j:
+                    fuse_j.append(nn.Sequential(
+                        nn.Conv2d(in_channels_list[i], out_channels_list[j], 3, 2**(j-i), 1, bias=False),
+                        nn.BatchNorm2d(out_channels_list[j])
+                    ))
+                else:
+                    fuse_j.append(nn.Sequential(
+                        nn.Conv2d(in_channels_list[i], out_channels_list[j], 1, bias=False),
+                        nn.BatchNorm2d(out_channels_list[j]),
+                        nn.Upsample(scale_factor=2**(i-j), mode='bilinear', align_corners=True)
+                    ))
+            self.fuse.append(fuse_j)
+        self.relu = nn.ReLU(inplace=True)
 
-        self.upsample_low = nn.Sequential(
-            nn.Upsample(scale_factor=scale_factor, mode='bilinear', align_corners=True),
-            nn.Conv2d(low_channels, low_channels, kernel_size=1, bias=False),
-            nn.GroupNorm(min(32, low_channels), low_channels)
-        )
+    def forward(self, x_list):
+        out = []
+        for j in range(self.num_out):
+            y = None
+            for i in range(self.num_in):
+                if y is None:
+                    y = self.fuse[j][i](x_list[i])
+                else:
+                    y = y + self.fuse[j][i](x_list[i])
+            out.append(self.relu(y))
+        return out
 
-        total_channels = high_channels + low_channels
-        self.projection = nn.Sequential(
-            nn.Conv2d(total_channels, out_channels, kernel_size=1, bias=False),
-            nn.GroupNorm(min(32, out_channels), out_channels),
-            nn.GELU()
-        )
 
-    def forward(self, high_feat: torch.Tensor,
-                low_feat: torch.Tensor) -> torch.Tensor:
+class HRNetStage(nn.Module):
+    def __init__(self, channels_list, num_blocks=4, block=BasicBlock,
+                 use_mamba=False, use_spectral=False, sizes=None):
+        super().__init__()
+        self.branches = nn.ModuleList()
 
-        low_up = self.upsample_low(low_feat)
+        for idx, ch in enumerate(channels_list):
+            h, w = sizes[idx] if sizes else (64, 64)
+            if use_mamba:
+                blocks = [MambaBlock(ch, ch, use_mamba=use_mamba, use_spectral=use_spectral, height=h, width=w)
+                          for _ in range(num_blocks)]
+            else:
+                blocks = [block(ch, ch) for _ in range(num_blocks)]
+            self.branches.append(nn.Sequential(*blocks))
 
-        concat = torch.cat([high_feat, low_up], dim=1)
+        self.fuse = FuseLayer(channels_list, channels_list)
 
-        output = self.projection(concat)
+    def forward(self, x_list):
+        out = [self.branches[i](x_list[i]) for i in range(len(x_list))]
+        return self.fuse(out)
 
-        return output
 
 class HRNetV2MambaBackbone(nn.Module):
-
-    def __init__(self, in_channels: int = 3, base_channels: int = 64,
-                 num_stages: int = 4, blocks_per_stage: int = 2,
-                 mamba_depth: int = 2, img_size: int = 256,
-                 use_mamba: bool = True, use_spectral: bool = True):
+    def __init__(self, in_channels=3, base_channels=32, num_stages=4,
+                 blocks_per_stage=4, use_mamba=True, use_spectral=True,
+                 img_size=256, mamba_depth=2):
         super().__init__()
 
-        self.in_channels = in_channels
-        self.base_channels = base_channels
-        self.num_stages = num_stages
-        self.img_size = img_size
-        self.use_mamba = use_mamba
-        self.use_spectral = use_spectral
+        self.stem = HRNetStem(in_channels, 64)
 
-        self.stem = HRNetStem(in_channels, base_channels, stride=4)
-
-        high_res_size = img_size // 4
-        low_res_size = img_size // 8
-
-        high_channels = base_channels
-        low_channels = base_channels * 2
-
-        self.create_low_stream = nn.Sequential(
-            nn.Conv2d(high_channels, low_channels, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.GroupNorm(min(32, low_channels), low_channels),
-            nn.GELU()
+        self.layer1 = nn.Sequential(
+            Bottleneck(64, 64, downsample=nn.Sequential(
+                nn.Conv2d(64, 256, 1, bias=False), nn.BatchNorm2d(256)
+            )),
+            Bottleneck(256, 64),
+            Bottleneck(256, 64),
+            Bottleneck(256, 64)
         )
 
-        self.high_res_stages = nn.ModuleList()
+        C = base_channels
+        self.transition1 = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(256, C, 3, 1, 1, bias=False), nn.BatchNorm2d(C), nn.ReLU(True)),
+            nn.Sequential(nn.Conv2d(256, C*2, 3, 2, 1, bias=False), nn.BatchNorm2d(C*2), nn.ReLU(True))
+        ])
 
-        self.low_res_stages = nn.ModuleList()
+        s = img_size // 4
+        self.stage2 = HRNetStage([C, C*2], blocks_per_stage, BasicBlock,
+                                  use_mamba, use_spectral, [(s, s), (s//2, s//2)])
 
-        self.fusion_modules = nn.ModuleList()
+        self.transition2 = nn.ModuleList([
+            nn.Identity(),
+            nn.Identity(),
+            nn.Sequential(nn.Conv2d(C*2, C*4, 3, 2, 1, bias=False), nn.BatchNorm2d(C*4), nn.ReLU(True))
+        ])
 
-        for stage_idx in range(num_stages):
+        self.stage3 = HRNetStage([C, C*2, C*4], blocks_per_stage, BasicBlock,
+                                  use_mamba, use_spectral, [(s, s), (s//2, s//2), (s//4, s//4)])
 
-            self.high_res_stages.append(
-                HRNetStage(
-                    channels=high_channels,
-                    height=high_res_size,
-                    width=high_res_size,
-                    num_blocks=blocks_per_stage,
-                    mamba_depth=mamba_depth,
-                    use_mamba=use_mamba,
-                    use_spectral=use_spectral
-                )
-            )
+        self.transition3 = nn.ModuleList([
+            nn.Identity(),
+            nn.Identity(),
+            nn.Identity(),
+            nn.Sequential(nn.Conv2d(C*4, C*8, 3, 2, 1, bias=False), nn.BatchNorm2d(C*8), nn.ReLU(True))
+        ])
 
-            self.low_res_stages.append(
-                HRNetStage(
-                    channels=low_channels,
-                    height=low_res_size,
-                    width=low_res_size,
-                    num_blocks=blocks_per_stage,
-                    mamba_depth=mamba_depth,
-                    use_mamba=use_mamba,
-                    use_spectral=use_spectral
-                )
-            )
+        self.stage4 = HRNetStage([C, C*2, C*4, C*8], blocks_per_stage, BasicBlock,
+                                  use_mamba, use_spectral, [(s, s), (s//2, s//2), (s//4, s//4), (s//8, s//8)])
 
-            self.fusion_modules.append(
-                MultiScaleFusion(
-                    high_channels=high_channels,
-                    low_channels=low_channels,
-                    scale_factor=2
+        self.out_channels = C + C*2 + C*4 + C*8
+        self.feature_size = s
 
-                )
-            )
+    def forward(self, x) -> Dict[str, torch.Tensor]:
+        x = self.stem(x)
+        x = self.layer1(x)
 
-        self.aggregation = AggregationLayer(
-            high_channels=high_channels,
-            low_channels=low_channels,
-            out_channels=high_channels + low_channels,
-            scale_factor=2
-        )
+        x_list = [self.transition1[0](x), self.transition1[1](x)]
+        x_list = self.stage2(x_list)
 
-        self.out_channels = high_channels + low_channels
-        self.feature_size = high_res_size
+        x_list = [
+            self.transition2[0](x_list[0]),
+            self.transition2[1](x_list[1]),
+            self.transition2[2](x_list[1])
+        ]
+        x_list = self.stage3(x_list)
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        x_list = [
+            self.transition3[0](x_list[0]),
+            self.transition3[1](x_list[1]),
+            self.transition3[2](x_list[2]),
+            self.transition3[3](x_list[2])
+        ]
+        x_list = self.stage4(x_list)
 
-        high = self.stem(x)
+        h0 = x_list[0]
+        h1 = F.interpolate(x_list[1], size=h0.shape[2:], mode='bilinear', align_corners=True)
+        h2 = F.interpolate(x_list[2], size=h0.shape[2:], mode='bilinear', align_corners=True)
+        h3 = F.interpolate(x_list[3], size=h0.shape[2:], mode='bilinear', align_corners=True)
 
-        low = self.create_low_stream(high)
-
-        for stage_idx in range(self.num_stages):
-
-            high = self.high_res_stages[stage_idx](high)
-            low = self.low_res_stages[stage_idx](low)
-
-            high, low = self.fusion_modules[stage_idx](high, low)
-
-        features = self.aggregation(high, low)
+        features = torch.cat([h0, h1, h2, h3], dim=1)
 
         return {
             'features': features,
-            'high_res': high,
-            'low_res': low
+            'high_res': h0,
+            'low_res': h3
         }
 
+
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Testing HRNetV2-Mamba Backbone")
-    print("=" * 60)
-
-    print("\n[1] Testing SpectralVSSBlock...")
-    block = SpectralVSSBlock(channels=64, height=64, width=64, mamba_depth=2)
-    x = torch.randn(2, 64, 64, 64)
-    out = block(x)
-    print(f"Input: {x.shape} → Output: {out.shape}")
-
-    print("\n[2] Testing MultiScaleFusion...")
-    fusion = MultiScaleFusion(high_channels=64, low_channels=128, scale_factor=2)
-    high = torch.randn(2, 64, 64, 64)
-    low = torch.randn(2, 128, 32, 32)
-    new_high, new_low = fusion(high, low)
-    print(f"High: {high.shape} → {new_high.shape}")
-    print(f"Low: {low.shape} → {new_low.shape}")
-
-    print("\n[3] Testing HRNetV2MambaBackbone...")
-    backbone = HRNetV2MambaBackbone(
-        in_channels=3,
-        base_channels=64,
-        num_stages=4,
-        blocks_per_stage=2,
-        mamba_depth=2,
-        img_size=256
-    )
-
+    model = HRNetV2MambaBackbone(in_channels=3, base_channels=32, use_mamba=True, use_spectral=True, img_size=256)
     x = torch.randn(2, 3, 256, 256)
-    outputs = backbone(x)
-
+    out = model(x)
     print(f"Input: {x.shape}")
-    print(f"Features: {outputs['features'].shape}")
-    print(f"High-res: {outputs['high_res'].shape}")
-    print(f"Low-res: {outputs['low_res'].shape}")
-    print(f"Output channels: {backbone.out_channels}")
-
-    total_params = sum(p.numel() for p in backbone.parameters())
-    print(f"\nTotal parameters: {total_params:,}")
-
-    print("\n" + "=" * 60)
-    print("✓ All tests passed!")
-    print("=" * 60)
+    print(f"Features: {out['features'].shape}")
+    print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
