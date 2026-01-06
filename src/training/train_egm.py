@@ -10,6 +10,13 @@ Key Features:
     - Energy-aware loss weighting for boundary emphasis
     - Progressive training (coarse-to-fine)
 
+Usage:
+    # From project root:
+    python -m src.training.train_egm --lr 1e-4 --epochs 100
+    
+    # Or with PYTHONPATH:
+    PYTHONPATH=. python src/training/train_egm.py --config config.yaml
+
 References:
     [1] O. Bernard et al., "Deep Learning Techniques for Automatic MRI Cardiac
         Multi-structures Segmentation and Diagnosis," IEEE TMI, 2018.
@@ -17,6 +24,20 @@ References:
         Activation Functions," NeurIPS, 2020.
     [3] Liu et al., "VMamba: Visual State Space Model," arXiv, 2024.
 """
+
+import sys
+import os
+import argparse
+
+# Robust path setup for both module and direct execution
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.dirname(_SCRIPT_DIR)
+_PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 import torch
 import torch.nn as nn
@@ -29,9 +50,16 @@ from pathlib import Path
 from tqdm import tqdm
 import math
 import logging
+import yaml
 
-from egm_net import EGMNet, EGMNetLite
-from physics_loss import DiceLoss, FocalLoss
+# Import from src modules (now with proper path)
+try:
+    from src.models.egm_net import EGMNet, EGMNetLite
+    from src.losses.physics_loss import DiceLoss, FocalLoss
+except ImportError:
+    # Fallback for direct execution from training/
+    from models.egm_net import EGMNet, EGMNetLite
+    from losses.physics_loss import DiceLoss, FocalLoss
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +68,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
 
 
 # =============================================================================
@@ -515,48 +544,157 @@ def create_dummy_dataset(num_samples: int = 100, img_size: int = 256,
     return TensorDataset(images, masks)
 
 
-if __name__ == "__main__":
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Train EGM-Net for medical image segmentation',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # Config file
+    parser.add_argument('--config', type=str, default=None,
+                       help='Path to YAML config file')
+    
+    # Training hyperparameters (override config)
+    parser.add_argument('--lr', type=float, default=1e-4,
+                       help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=8,
+                       help='Batch size')
+    parser.add_argument('--num_points', type=int, default=4096,
+                       help='Number of points to sample per image')
+    
+    # Model config
+    parser.add_argument('--in_channels', type=int, default=3,
+                       help='Input channels (1=gray, 3=monogenic)')
+    parser.add_argument('--num_classes', type=int, default=4,
+                       help='Number of segmentation classes')
+    parser.add_argument('--img_size', type=int, default=256,
+                       help='Input image size')
+    parser.add_argument('--use_lite', action='store_true',
+                       help='Use EGMNetLite instead of full model')
+    
+    # Paths
+    parser.add_argument('--data_dir', type=str, default='./data',
+                       help='Path to data directory')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
+                       help='Directory to save checkpoints')
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Path to checkpoint to resume from')
+    
+    # Device
+    parser.add_argument('--device', type=str, default='cuda',
+                       help='Device (cuda or cpu)')
+    
+    # Testing
+    parser.add_argument('--test', action='store_true',
+                       help='Run quick test with dummy data')
+    
+    return parser.parse_args()
+
+
+def main():
+    """Main training function."""
+    args = parse_args()
+    
     print("=" * 60)
-    print("Testing EGM-Net Training Pipeline")
+    print("EGM-Net Training")
     print("=" * 60)
     
-    # Configuration
+    # Load config from YAML if provided
     config = {
-        'learning_rate': 1e-4,
+        'learning_rate': args.lr,
         'weight_decay': 1e-5,
-        'num_epochs': 3,  # Short test
-        'batch_size': 4,
-        'num_points': 2048,
+        'num_epochs': args.epochs,
+        'batch_size': args.batch_size,
+        'num_points': args.num_points,
         'boundary_ratio': 0.5,
         'spatial_weight': 1.0,
         'point_weight': 1.0,
         'consistency_weight': 0.1,
         'energy_weight': 0.5,
         'save_interval': 10,
-        'checkpoint_dir': './checkpoints_egm'
+        'checkpoint_dir': args.checkpoint_dir
     }
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    if args.config:
+        print(f"Loading config from {args.config}")
+        with open(args.config, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+        # Merge training config
+        if 'training' in yaml_config:
+            config.update(yaml_config['training'])
+        # CLI overrides YAML
+        config['learning_rate'] = args.lr
+        config['num_epochs'] = args.epochs
+        config['batch_size'] = args.batch_size
+    
+    # Device
+    device = args.device if torch.cuda.is_available() else 'cpu'
+    print(f"Device: {device}")
     
     # Create model
     print("\nCreating model...")
-    model = EGMNetLite(in_channels=1, num_classes=3, img_size=256)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    if args.use_lite:
+        model = EGMNetLite(
+            in_channels=args.in_channels,
+            num_classes=args.num_classes,
+            img_size=args.img_size
+        )
+    else:
+        model = EGMNet(
+            in_channels=args.in_channels,
+            num_classes=args.num_classes,
+            img_size=args.img_size,
+            use_hrnet=True,
+            use_mamba=True,
+            use_spectral=True,
+            use_fine_head=True
+        )
+    
+    params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {params:,}")
     
     # Create dataset
-    print("\nCreating dummy dataset...")
-    dataset = create_dummy_dataset(num_samples=32, img_size=256, num_classes=3)
-    train_loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+    if args.test:
+        print("\nRunning test with dummy data...")
+        dataset = create_dummy_dataset(
+            num_samples=32,
+            img_size=args.img_size,
+            num_classes=args.num_classes
+        )
+        train_loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+        config['num_epochs'] = 3  # Short test
+    else:
+        # TODO: Load actual dataset from args.data_dir
+        print(f"\nLoading data from {args.data_dir}")
+        # For now, use dummy data (replace with actual data loading)
+        dataset = create_dummy_dataset(
+            num_samples=100,
+            img_size=args.img_size,
+            num_classes=args.num_classes
+        )
+        train_loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
     
     # Create trainer
     print("\nInitializing trainer...")
     trainer = EGMNetTrainer(model, config, device=device)
+    
+    # Resume from checkpoint
+    if args.resume:
+        print(f"Resuming from {args.resume}")
+        trainer.load_checkpoint(args.resume)
     
     # Train
     print("\nStarting training...")
     trainer.train(train_loader, num_epochs=config['num_epochs'])
     
     print("\n" + "=" * 60)
-    print("✓ Training test completed!")
+    print("✓ Training completed!")
     print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+
