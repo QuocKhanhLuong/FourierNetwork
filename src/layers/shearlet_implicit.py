@@ -100,7 +100,7 @@ class ShearletImplicitHead(nn.Module):
         
         self.shearlet_basis = ShearletBasis(num_orientations)
 
-    def forward(self, features, coords=None, energy_gate=None):
+    def forward(self, features, coords=None, energy_gate=None, output_size=None):
         B, C, H, W = features.shape
         
         if coords is None:
@@ -138,6 +138,9 @@ class ShearletImplicitHead(nn.Module):
         logits = self.decoder(fused)
         
         logits = logits.permute(0, 2, 1).view(B, self.num_classes, H, W)
+        
+        if output_size is not None and (logits.shape[2] != output_size[0] or logits.shape[3] != output_size[1]):
+            logits = F.interpolate(logits, size=output_size, mode='bilinear', align_corners=True)
         
         return logits
 
