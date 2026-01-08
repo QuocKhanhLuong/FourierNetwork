@@ -15,7 +15,7 @@ echo "Working dir: $(pwd)"
 
 # Config
 EPOCHS=200
-BATCH_SIZE=8
+BATCH_SIZE=16
 LR=0.0001
 DATA_DIR="preprocessed_data/ACDC"
 

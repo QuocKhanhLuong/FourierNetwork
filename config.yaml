@@ -113,7 +113,7 @@ heads:
 # TRAINING CONFIGURATION
 # =============================================================================
 training:
-  epochs: 150
+  epochs: 200
   batch_size: 8
   learning_rate: 1e-4
   weight_decay: 1e-5
@@ -129,7 +129,7 @@ training:
     boundary_loss: true
     boundary_weight: 0.5
     warmup_epochs: 10
-    deep_supervision: false
+    deep_supervision: true
     tta_eval: false
     tta_test: true
   
