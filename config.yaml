@@ -2,125 +2,137 @@
 # EGM-Net Configuration File
 # =============================================================================
 
-preset: "sota"
+preset: "bio"
 
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
 model:
   name: "EGMNet"
   in_channels: 3
   num_classes: 4
-  img_size: 256
+  img_size: 224
   
   backbone:
-    type: "hrnet_mamba"
+    type: "hrnet"  # "hrnet" or "simple"
     base_channels: 32
     num_stages: 4
-    blocks_per_stage: 4
-    low_res_multiplier: 2
+    blocks_per_stage: 2
     
   components:
-    use_mamba: true
+    # Mamba SSM (requires mamba-ssm package)
+    use_mamba: false
     mamba_depth: 2
-    mamba_scan_dim: 64
     
-    use_spectral: true
+    # Spectral FFT processing
+    use_spectral: false
     spectral_threshold: 0.1
-    
-    use_dual_stream: true
-    
-  # NEW: Retinal Preprocessing (DoG)
-  retinal:
-    enabled: false
-    type: "dog"  # "dog" or "on_off"
-    scales: [[1.0, 2.0], [2.0, 4.0]]
-    kernel_size: 15
-    concat_original: true
 
+# =============================================================================
+# RETINAL PREPROCESSING (DoG Layer)
+# =============================================================================
+retinal:
+  enabled: true
+  type: "dog"  # "dog" (Difference of Gaussians)
+  scales: [[1.0, 2.0], [2.0, 4.0]]
+  kernel_size: 15
+  concat_original: true
+
+# =============================================================================
+# SEGMENTATION HEADS
+# =============================================================================
 heads:
+  # Coarse Head (main segmentation)
   coarse:
-    type: "constellation"
+    type: "constellation"  # "constellation" (RBF), "linear", "conv"
+    enabled: true
     embedding_dim: 2
     init_gamma: 1.0
     
+  # Fine Head (implicit refinement)
   fine:
-    type: "gabor"  # "gabor" (default), "shearlet" (new), "none"
+    type: "shearlet"  # "gabor", "shearlet", "none"
     enabled: true
     hidden_dim: 256
     num_layers: 4
     num_frequencies: 64
     use_energy_gating: true
     
-  # NEW: Shearlet-specific config
+  # Shearlet-specific config
   shearlet:
     num_orientations: 8
     num_frequencies: 4
     hidden_dim: 256
     
+  # Fusion method
   fusion:
-    type: "energy_gated"
+    type: "energy_gated"  # "energy_gated", "average", "learned"
     temperature: 1.0
 
-loss:
-  dice_weight: 1.0
-  ce_weight: 0.5
-  focal_weight: 0.0
-  focal_gamma: 2.0
-  
-  boundary_weight: 0.1
-  spectral_weight: 0.0
-  
-  eye_opening:
-    enabled: true
-    weight: 0.05
-    warmup_epochs: 10
-    radius: 5
-    
-  consistency:
-    enabled: true
-    weight: 0.1
-
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
 training:
   epochs: 100
   batch_size: 8
   learning_rate: 1e-4
   weight_decay: 1e-5
   optimizer: "adamw"
-  scheduler: "cosine"
+  scheduler: "reduce_plateau"  # "cosine", "reduce_plateau"
+  early_stop: 20
   
-  point_sampling:
-    enabled: true
-    num_samples: 4096
-    strategy: "uncertainty_energy"
-    
+  # Gradient clipping
+  grad_clip: 1.0
+  
+  # Augmentation
   augmentation:
     random_flip: true
     random_rotation: true
     rotation_range: 15
 
-inference:
-  use_implicit: true
-  output_scale: 1.0
-  tta_enabled: false
+# =============================================================================
+# LOSS CONFIGURATION
+# =============================================================================
+loss:
+  ce_weight: 1.0
+  dice_weight: 0.5
+  focal_weight: 0.0
+  focal_gamma: 2.0
+  boundary_weight: 0.0
 
 # =============================================================================
-# PRESETS REFERENCE:
+# DATA CONFIGURATION
+# =============================================================================
+data:
+  root: "preprocessed_data/ACDC"
+  train_split: 0.8
+  num_workers: 0
+  pin_memory: true
+
+# =============================================================================
+# PRESETS REFERENCE
 # =============================================================================
 # baseline:
-#   - use_mamba: false, use_spectral: false
-#   - fine.type: "none", coarse.type: "linear"
 #   - retinal.enabled: false
+#   - components.use_mamba: false, use_spectral: false
+#   - heads.coarse.type: "linear"
+#   - heads.fine.enabled: false
 #
 # lite:
-#   - use_mamba: false, use_spectral: false
-#   - fine.type: "none", coarse.type: "constellation"
 #   - retinal.enabled: false
+#   - components.use_mamba: false, use_spectral: false
+#   - heads.coarse.type: "constellation"
+#   - heads.fine.enabled: false
 #
 # sota:
-#   - use_mamba: true, use_spectral: true
-#   - fine.type: "gabor", coarse.type: "constellation"
 #   - retinal.enabled: false
+#   - components.use_mamba: true, use_spectral: true
+#   - heads.coarse.type: "constellation"
+#   - heads.fine.type: "gabor"
 #
-# bio (NEW):
-#   - use_mamba: true, use_spectral: true
-#   - fine.type: "shearlet", coarse.type: "constellation"
+# bio:
 #   - retinal.enabled: true
+#   - components.use_mamba: false, use_spectral: false
+#   - heads.coarse.type: "constellation"
+#   - heads.fine.type: "shearlet"
 # =============================================================================
