@@ -224,7 +224,7 @@ class EGMNet(nn.Module):
             energy_for_fine = F.interpolate(energy, size=features.shape[-2:],
                                             mode='bilinear', align_corners=True)
 
-            fine_logits = self.fine_head(features, energy_for_fine, output_size=output_size)
+            fine_logits = self.fine_head(features, energy_gate=energy_for_fine, output_size=output_size)
 
             if fine_logits.shape[-2:] != output_size:
                 fine_logits = F.interpolate(fine_logits, size=output_size,
