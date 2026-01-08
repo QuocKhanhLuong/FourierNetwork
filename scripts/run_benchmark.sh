@@ -14,7 +14,7 @@ cd "$PROJECT_ROOT"
 echo "Working dir: $(pwd)"
 
 # Config
-EPOCHS=10
+EPOCHS=200
 BATCH_SIZE=8
 LR=0.0001
 DATA_DIR="preprocessed_data/ACDC"

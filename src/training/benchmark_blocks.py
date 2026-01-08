@@ -1,6 +1,7 @@
 """
 Block Benchmark Script
 Test các block types lần lượt trên HRNet thuần (không fine-head, không spectral)
+Full metrics: Dice, IoU, Precision, Recall for each class
 """
 
 import sys
@@ -20,13 +21,18 @@ from data.acdc_dataset import ACDCDataset2D
 
 
 CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
-
 BLOCK_TYPES = ['none', 'convnext', 'dcn', 'inverted_residual', 'swin', 'fno', 'wavelet', 'rwkv']
 
 
-def evaluate(model, loader, device, num_classes=4):
+def evaluate_full(model, loader, device, num_classes=4):
+    """Full evaluation with Dice, IoU, Precision, Recall per class"""
     model.eval()
-    dice_s = [0.]*num_classes
+    
+    tp = [0]*num_classes
+    fp = [0]*num_classes
+    fn = [0]*num_classes
+    dice_sum = [0.]*num_classes
+    iou_sum = [0.]*num_classes
     batches = 0
     
     with torch.no_grad():
@@ -40,22 +46,40 @@ def evaluate(model, loader, device, num_classes=4):
                 pc = (preds == c).float().view(-1)
                 tc = (tgts == c).float().view(-1)
                 inter = (pc * tc).sum()
-                dice_s[c] += ((2.*inter + 1e-6) / (pc.sum() + tc.sum() + 1e-6)).item()
+                
+                dice_sum[c] += ((2.*inter + 1e-6) / (pc.sum() + tc.sum() + 1e-6)).item()
+                iou_sum[c] += ((inter + 1e-6) / (pc.sum() + tc.sum() - inter + 1e-6)).item()
+                tp[c] += inter.item()
+                fp[c] += (pc.sum() - inter).item()
+                fn[c] += (tc.sum() - inter).item()
     
-    return np.mean([dice_s[c] / batches for c in range(1, num_classes)])
+    metrics = {
+        'dice': [dice_sum[c] / batches for c in range(num_classes)],
+        'iou': [iou_sum[c] / batches for c in range(num_classes)],
+        'precision': [tp[c] / (tp[c] + fp[c] + 1e-6) for c in range(num_classes)],
+        'recall': [tp[c] / (tp[c] + fn[c] + 1e-6) for c in range(num_classes)],
+    }
+    
+    # Mean foreground (exclude BG)
+    metrics['mean_dice'] = np.mean(metrics['dice'][1:])
+    metrics['mean_iou'] = np.mean(metrics['iou'][1:])
+    metrics['mean_prec'] = np.mean(metrics['precision'][1:])
+    metrics['mean_rec'] = np.mean(metrics['recall'][1:])
+    
+    return metrics
 
 
-def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr=1e-4):
-    """Train một config và trả về best val dice"""
+def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr=1e-4, num_classes=4):
+    """Train một config và trả về best metrics"""
     
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"Testing: {block_type.upper()}")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
     
     try:
         model = EGMNet(
             in_channels=3,
-            num_classes=4,
+            num_classes=num_classes,
             img_size=224,
             use_hrnet=True,
             use_mamba=False,
@@ -77,6 +101,7 @@ def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr
     criterion = nn.CrossEntropyLoss()
     
     best_dice = 0
+    best_metrics = None
     
     for epoch in range(epochs):
         model.train()
@@ -103,15 +128,30 @@ def train_one_config(block_type, train_loader, val_loader, device, epochs=20, lr
             train_loss += loss.item()
             valid_batches += 1
         
-        val_dice = evaluate(model, val_loader, device)
+        # Full evaluation
+        metrics = evaluate_full(model, val_loader, device, num_classes)
         
-        if val_dice > best_dice:
-            best_dice = val_dice
+        if metrics['mean_dice'] > best_dice:
+            best_dice = metrics['mean_dice']
+            best_metrics = metrics.copy()
         
-        print(f"  E{epoch+1}: Loss={train_loss/max(valid_batches,1):.4f}, Val Dice={val_dice:.4f}")
+        # Per-epoch summary
+        print(f"  E{epoch+1}: Loss={train_loss/max(valid_batches,1):.4f} | "
+              f"Dice={metrics['mean_dice']:.4f} | IoU={metrics['mean_iou']:.4f}")
     
-    print(f"  Best Dice: {best_dice:.4f}")
-    return best_dice, params
+    # Print final per-class metrics
+    if best_metrics:
+        print(f"\n  --- Best Results for {block_type.upper()} ---")
+        print(f"  {'Class':<6} {'Dice':>8} {'IoU':>8} {'Prec':>8} {'Rec':>8}")
+        print(f"  {'-'*40}")
+        for c in range(num_classes):
+            print(f"  {CLASS_MAP[c]:<6} {best_metrics['dice'][c]:>8.4f} {best_metrics['iou'][c]:>8.4f} "
+                  f"{best_metrics['precision'][c]:>8.4f} {best_metrics['recall'][c]:>8.4f}")
+        print(f"  {'-'*40}")
+        print(f"  {'AvgFG':<6} {best_metrics['mean_dice']:>8.4f} {best_metrics['mean_iou']:>8.4f} "
+              f"{best_metrics['mean_prec']:>8.4f} {best_metrics['mean_rec']:>8.4f}")
+    
+    return best_metrics, params
 
 
 def main():
@@ -125,9 +165,9 @@ def main():
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print("Block Benchmark - Pure HRNet (No Fine Head, No Spectral)")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
     print(f"Device: {device}")
     print(f"Epochs per block: {args.epochs}")
     print(f"Blocks to test: {args.blocks}")
@@ -158,29 +198,55 @@ def main():
     
     for block_type in args.blocks:
         torch.cuda.empty_cache()
-        best_dice, params = train_one_config(
+        metrics, params = train_one_config(
             block_type, train_loader, val_loader, device, 
             epochs=args.epochs, lr=args.lr
         )
-        results[block_type] = {'dice': best_dice, 'params': params}
+        results[block_type] = {'metrics': metrics, 'params': params}
     
-    print(f"\n{'='*60}")
-    print("BENCHMARK RESULTS")
-    print(f"{'='*60}")
-    print(f"{'Block':<20} {'Params':>12} {'Best Dice':>12}")
-    print("-"*50)
+    # Final Summary Table
+    print(f"\n{'='*70}")
+    print("BENCHMARK RESULTS SUMMARY")
+    print(f"{'='*70}")
+    print(f"{'Block':<20} {'Params':>12} {'Dice':>8} {'IoU':>8} {'Prec':>8} {'Rec':>8}")
+    print("-"*70)
     
-    sorted_results = sorted(results.items(), key=lambda x: x[1]['dice'] or 0, reverse=True)
+    sorted_results = sorted(
+        results.items(), 
+        key=lambda x: x[1]['metrics']['mean_dice'] if x[1]['metrics'] else 0, 
+        reverse=True
+    )
     
     for block_type, res in sorted_results:
-        dice = f"{res['dice']:.4f}" if res['dice'] else "FAILED"
-        params = f"{res['params']:,}" if res['params'] else "N/A"
-        print(f"{block_type:<20} {params:>12} {dice:>12}")
+        if res['metrics']:
+            m = res['metrics']
+            print(f"{block_type:<20} {res['params']:>12,} {m['mean_dice']:>8.4f} {m['mean_iou']:>8.4f} "
+                  f"{m['mean_prec']:>8.4f} {m['mean_rec']:>8.4f}")
+        else:
+            print(f"{block_type:<20} {'FAILED':>12} {'-':>8} {'-':>8} {'-':>8} {'-':>8}")
     
-    print("-"*50)
+    print("-"*70)
     
-    if sorted_results[0][1]['dice']:
-        print(f"\n★ Best: {sorted_results[0][0]} (Dice={sorted_results[0][1]['dice']:.4f})")
+    if sorted_results[0][1]['metrics']:
+        best = sorted_results[0]
+        print(f"\n★ Best: {best[0]} (Dice={best[1]['metrics']['mean_dice']:.4f})")
+    
+    # Save results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_file = f"benchmark_results_{timestamp}.txt"
+    with open(result_file, 'w') as f:
+        f.write(f"Block Benchmark Results - {timestamp}\n")
+        f.write(f"Epochs: {args.epochs}, LR: {args.lr}\n\n")
+        f.write(f"{'Block':<20} {'Params':>12} {'Dice':>8} {'IoU':>8} {'Prec':>8} {'Rec':>8}\n")
+        f.write("-"*70 + "\n")
+        for block_type, res in sorted_results:
+            if res['metrics']:
+                m = res['metrics']
+                f.write(f"{block_type:<20} {res['params']:>12,} {m['mean_dice']:>8.4f} {m['mean_iou']:>8.4f} "
+                        f"{m['mean_prec']:>8.4f} {m['mean_rec']:>8.4f}\n")
+            else:
+                f.write(f"{block_type:<20} FAILED\n")
+    print(f"\nResults saved to: {result_file}")
 
 
 if __name__ == '__main__':

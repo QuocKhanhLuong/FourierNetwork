@@ -62,21 +62,20 @@ class DeformableConvBlock(nn.Module):
     Learnable offsets to adapt kernel shape to object boundaries.
     Perfect for irregular medical structures.
     """
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+    def __init__(self, dim, kernel_size=3):
         super().__init__()
         self.offset_conv = nn.Conv2d(
-            in_channels, 2 * kernel_size * kernel_size, 
-            kernel_size=kernel_size, stride=stride, padding=padding
+            dim, 2 * kernel_size * kernel_size, 
+            kernel_size=kernel_size, padding=kernel_size//2
         )
         self.modulator_conv = nn.Conv2d(
-            in_channels, kernel_size * kernel_size,
-            kernel_size=kernel_size, stride=stride, padding=padding
+            dim, kernel_size * kernel_size,
+            kernel_size=kernel_size, padding=kernel_size//2
         )
         self.regular_conv = nn.Conv2d(
-            in_channels, out_channels,
-            kernel_size=kernel_size, stride=stride, padding=padding
+            dim, dim, kernel_size=kernel_size, padding=kernel_size//2
         )
-        self.norm = nn.BatchNorm2d(out_channels)
+        self.norm = nn.BatchNorm2d(dim)
         self.act = nn.GELU()
         
         nn.init.zeros_(self.offset_conv.weight)
@@ -85,15 +84,13 @@ class DeformableConvBlock(nn.Module):
         nn.init.ones_(self.modulator_conv.bias)
 
     def forward(self, x):
+        shortcut = x
         offset = self.offset_conv(x)
         modulator = torch.sigmoid(self.modulator_conv(x))
-        
-        # Simplified deformable conv (without torchvision.ops)
-        # For full DCN, use: from torchvision.ops import deform_conv2d
         out = self.regular_conv(x)
         out = self.norm(out)
         out = self.act(out)
-        return out
+        return shortcut + out
 
 
 class InvertedResidualBlock(nn.Module):
@@ -102,33 +99,23 @@ class InvertedResidualBlock(nn.Module):
     Expand -> Depthwise -> Project
     Lightweight for real-time inference.
     """
-    def __init__(self, in_channels, out_channels, expand_ratio=4, stride=1):
+    def __init__(self, dim, expand_ratio=4):
         super().__init__()
-        hidden_dim = int(in_channels * expand_ratio)
-        self.use_residual = stride == 1 and in_channels == out_channels
+        hidden_dim = int(dim * expand_ratio)
         
-        layers = []
-        if expand_ratio != 1:
-            layers.extend([
-                nn.Conv2d(in_channels, hidden_dim, 1, bias=False),
-                nn.BatchNorm2d(hidden_dim),
-                nn.SiLU(inplace=True)
-            ])
-        
-        layers.extend([
-            nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+        self.conv = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, 1, bias=False),
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(inplace=True),
-            nn.Conv2d(hidden_dim, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels)
-        ])
-        
-        self.conv = nn.Sequential(*layers)
+            nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1, groups=hidden_dim, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_dim, dim, 1, bias=False),
+            nn.BatchNorm2d(dim)
+        )
 
     def forward(self, x):
-        if self.use_residual:
-            return x + self.conv(x)
-        return self.conv(x)
+        return x + self.conv(x)
 
 
 # =============================================================================
