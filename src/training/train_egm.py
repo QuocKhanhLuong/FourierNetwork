@@ -427,6 +427,9 @@ def parse_args():
     parser.add_argument('--no_spectral', dest='use_spectral', action='store_false')
     parser.add_argument('--use_fine_head', action='store_true', default=True)
     parser.add_argument('--no_fine_head', dest='use_fine_head', action='store_false')
+    
+    parser.add_argument('--use_dog', action='store_true', default=False)
+    parser.add_argument('--fine_head_type', type=str, default='gabor', choices=['gabor', 'shearlet'])
 
     return parser.parse_args()
 
@@ -484,7 +487,9 @@ def main():
             use_hrnet=True,
             use_mamba=args.use_mamba,
             use_spectral=args.use_spectral,
-            use_fine_head=args.use_fine_head
+            use_fine_head=args.use_fine_head,
+            use_dog=args.use_dog,
+            fine_head_type=args.fine_head_type
         )
 
     params = sum(p.numel() for p in model.parameters())
