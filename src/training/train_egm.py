@@ -509,17 +509,15 @@ def main():
         print(f"\nLoading data from {args.data_dir}")
         
         from data.acdc_dataset import ACDCDataset2D
-        from sklearn.model_selection import train_test_split
-        import glob
         import os
         
         train_dir = os.path.join(args.data_dir, 'training')
         
         dataset = ACDCDataset2D(train_dir, use_memmap=True, in_channels=args.in_channels)
         
-        num_vols = len(dataset.vol_paths) if hasattr(dataset, 'vol_paths') else len(dataset)
-        train_size = int(num_vols * 0.8)
-        val_size = num_vols - train_size
+        total_size = len(dataset)
+        train_size = int(total_size * 0.8)
+        val_size = total_size - train_size
         
         train_ds, val_ds = torch.utils.data.random_split(
             dataset, [train_size, val_size], 
@@ -527,6 +525,7 @@ def main():
         )
         
         train_loader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True, num_workers=0)
+        print(f"Train: {train_size} slices, Val: {val_size} slices")
 
     print("\nInitializing trainer...")
     trainer = EGMNetTrainer(model, config, device=device)
