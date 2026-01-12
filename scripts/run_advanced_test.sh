@@ -1,12 +1,13 @@
 #!/bin/bash
-# Block Benchmark Script
-# Chạy benchmark các block types trên HRNet thuần
+# Test Advanced Architectures
+# 1. Asymmetric DCN Depth (2-3-4 blocks per stage)
+# 2. Hybrid Inverted Residual + DCN
+# 3. With/Without PointRend
 
 echo "========================================"
-echo "Block Benchmark - Pure HRNet"  
+echo "Advanced Architecture Test"
 echo "========================================"
 
-# Navigate to project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
@@ -14,21 +15,19 @@ cd "$PROJECT_ROOT"
 echo "Working dir: $(pwd)"
 
 # Config
-EPOCHS=200
+EPOCHS=100
 BATCH_SIZE=8
 LR=0.0001
 DATA_DIR="preprocessed_data/ACDC"
 
-# Add src to PYTHONPATH
 export PYTHONPATH="$PROJECT_ROOT/src:$PYTHONPATH"
 
-# Chạy benchmark
-python src/training/benchmark_blocks.py \
+# Run test
+python src/training/test_advanced_arch.py \
     --data_dir $DATA_DIR \
     --epochs $EPOCHS \
     --batch_size $BATCH_SIZE \
-    --lr $LR \
-    --blocks basic convnext dcn inverted_residual swin fno wavelet rwkv
+    --lr $LR
 
 echo ""
-echo "✓ Benchmark completed!"
+echo "✓ Advanced architecture test completed!"
