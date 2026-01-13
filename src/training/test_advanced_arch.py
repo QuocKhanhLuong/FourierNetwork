@@ -128,11 +128,12 @@ class HRNetAdvanced(nn.Module):
             for i, bt in enumerate(block_types):
                 # Dilation Pyramid: DCN blocks with >= 3 blocks use increasing dilation
                 # [1, 2, 4, 8, 16, 32] for multi-scale receptive field
-                current_dilation = 1
                 if bt == 'dcn' and num_blocks >= 3:
-                    current_dilation = 2 ** min(i, 5)  # Cap at 32 to avoid too large
-                
-                blocks.append(self.get_block(bt, ch, dilation=current_dilation))
+                    current_dilation = 2 ** min(i, 5)  # Cap at 32
+                    blocks.append(self.get_block(bt, ch, dilation=current_dilation))
+                else:
+                    # Other blocks don't support dilation
+                    blocks.append(self.get_block(bt, ch))
             branches.append(nn.Sequential(*blocks))
         
         fuse = FuseLayer(channels_list, channels_list)
