@@ -76,60 +76,77 @@ class ConvNeXtBlock(nn.Module):
 
 
 class DeformableConvBlock(nn.Module):
-    """Deformable Convolution v2 Block (Hardened Version)"""
-    def __init__(self, dim, kernel_size=3):
+    """
+    Deformable Conv v3 (Pyramid Ready)
+    - Supports dilation for multi-scale context (ASPP-style)
+    - Supports channel change (in_dim != out_dim) with projection shortcut
+    """
+    def __init__(self, dim, out_dim=None, kernel_size=3, dilation=1):
         super().__init__()
+        self.in_dim = dim
+        self.out_dim = out_dim if out_dim is not None else dim
         self.kernel_size = kernel_size
-        self.padding = kernel_size // 2
+        self.dilation = dilation
         
-        # Output channel = 2 * k * k (dx, dy cho mỗi điểm kernel)
+        # Dynamic padding to maintain spatial size with dilation
+        self.padding = (kernel_size + (kernel_size - 1) * (dilation - 1)) // 2
+        
+        # Offset & Modulator (must use same dilation)
         self.offset_conv = nn.Conv2d(
-            dim, 2 * kernel_size * kernel_size, 
-            kernel_size=kernel_size, padding=self.padding
+            self.in_dim, 2 * kernel_size * kernel_size, 
+            kernel_size=kernel_size, padding=self.padding, dilation=dilation
         )
-        
-        # Modulator output channel = k * k
         self.modulator_conv = nn.Conv2d(
-            dim, kernel_size * kernel_size,
-            kernel_size=kernel_size, padding=self.padding
+            self.in_dim, kernel_size * kernel_size,
+            kernel_size=kernel_size, padding=self.padding, dilation=dilation
         )
         
+        # Main conv (in -> out)
         self.regular_conv = nn.Conv2d(
-            dim, dim, kernel_size=kernel_size, padding=self.padding, bias=True
+            self.in_dim, self.out_dim, 
+            kernel_size=kernel_size, padding=self.padding, 
+            dilation=dilation, bias=True
         )
         
-        self.norm = nn.BatchNorm2d(dim)
+        self.norm = nn.BatchNorm2d(self.out_dim)
         self.act = nn.GELU()
         
-        # Init weights
+        # Shortcut projection for channel mismatch
+        if self.in_dim != self.out_dim:
+            self.shortcut_proj = nn.Sequential(
+                nn.Conv2d(self.in_dim, self.out_dim, kernel_size=1, bias=False),
+                nn.BatchNorm2d(self.out_dim)
+            )
+        else:
+            self.shortcut_proj = nn.Identity()
+        
+        # Init weights (hardened)
         nn.init.zeros_(self.offset_conv.weight)
         nn.init.zeros_(self.offset_conv.bias)
         nn.init.zeros_(self.modulator_conv.weight)
-        # Init bias -2.0 để sigmoid ra giá trị nhỏ lúc đầu (~0.1), giúp training êm hơn
-        nn.init.constant_(self.modulator_conv.bias, -2.0) 
+        nn.init.constant_(self.modulator_conv.bias, -2.0)
 
     def forward(self, x):
-        # 1. Offset bounded by tanh (Safety Clamp)
-        # Giới hạn offset trong khoảng [-kernel_size, kernel_size]
-        # Giúp kernel không bị văng ra quá xa khỏi vùng quan tâm
+        # Offset bounded by tanh
         offset = torch.tanh(self.offset_conv(x)) * self.kernel_size 
-        
-        # 2. Modulator
         modulator = torch.sigmoid(self.modulator_conv(x))
         
-        # 3. Ops
         out = torchvision.ops.deform_conv2d(
             input=x, 
             offset=offset, 
             weight=self.regular_conv.weight, 
             bias=self.regular_conv.bias,     
             padding=self.padding,
-            mask=modulator
+            mask=modulator,
+            dilation=self.dilation  # Enable multi-scale receptive field
         )
         
         out = self.norm(out)
         out = self.act(out)
-        return x + out
+        
+        # Residual with projection
+        shortcut = self.shortcut_proj(x)
+        return shortcut + out
 
 
 class InvertedResidualBlock(nn.Module):

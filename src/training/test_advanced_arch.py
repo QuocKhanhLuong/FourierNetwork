@@ -23,14 +23,12 @@ from data.acdc_dataset import ACDCDataset2D
 CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
 
 
-# =============================================================================
-# CUSTOM HRNET WITH CONFIGURABLE BLOCKS
-# =============================================================================
+
 
 class HRNetAdvanced(nn.Module):
     """HRNet with configurable block types and depths per stage."""
     
-    def __init__(self, in_channels=3, base_channels=32, img_size=224,
+    def __init__(self, in_channels=3, base_channels=64, img_size=224,
                  stage_configs=None, use_pointrend=False, num_classes=4):
         """
         Args:
@@ -118,13 +116,23 @@ class HRNetAdvanced(nn.Module):
             )
     
     def _make_stage(self, channels_list, block_types, sizes, FuseLayer):
-        """Create a stage with configurable block types."""
+        """
+        Create a stage with configurable block types.
+        DCN blocks automatically use Dilation Pyramid (HDC strategy) for multi-scale context.
+        """
         branches = nn.ModuleList()
+        num_blocks = len(block_types)
         
         for idx, ch in enumerate(channels_list):
             blocks = []
-            for bt in block_types:
-                blocks.append(self.get_block(bt, ch))
+            for i, bt in enumerate(block_types):
+                # Dilation Pyramid: DCN blocks with >= 3 blocks use increasing dilation
+                # [1, 2, 4, 8, 16, 32] for multi-scale receptive field
+                current_dilation = 1
+                if bt == 'dcn' and num_blocks >= 3:
+                    current_dilation = 2 ** min(i, 5)  # Cap at 32 to avoid too large
+                
+                blocks.append(self.get_block(bt, ch, dilation=current_dilation))
             branches.append(nn.Sequential(*blocks))
         
         fuse = FuseLayer(channels_list, channels_list)
@@ -182,10 +190,6 @@ class HRNetAdvanced(nn.Module):
         
         return {'output': logits}
 
-
-# =============================================================================
-# EVALUATION
-# =============================================================================
 
 def compute_hd95(pred, target):
     from scipy.ndimage import distance_transform_edt
@@ -256,6 +260,91 @@ def evaluate(model, loader, device, num_classes=4):
         'mean_iou': np.mean([iou_sum[c] / batches for c in range(1, num_classes)]),
         'mean_hd95': np.mean([hd95_sum[c] / max(hd95_count[c], 1) for c in range(1, num_classes)])
     }
+
+
+def evaluate_3d(model, dataset, device, num_classes=4):
+    """
+    3D Volumetric Evaluation - Groups slices by volume and computes 3D metrics.
+    More accurate than 2D slice-by-slice evaluation.
+    """
+    from collections import defaultdict
+    from scipy.ndimage import distance_transform_edt
+    
+    model.eval()
+    
+    # Group predictions by volume
+    vol_preds = defaultdict(list)  # vol_idx -> list of (slice_idx, pred, target)
+    vol_targets = defaultdict(list)
+    
+    print("\n[3D Eval] Collecting predictions by volume...")
+    
+    with torch.no_grad():
+        for i in range(len(dataset)):
+            vol_idx, slice_idx = dataset.dataset.index_map[dataset.indices[i]]
+            
+            img, target = dataset[i]
+            img = img.unsqueeze(0).to(device)
+            
+            out = model(img)['output']
+            pred = out.argmax(1).squeeze(0).cpu().numpy()
+            target_np = target.numpy()
+            
+            vol_preds[vol_idx].append((slice_idx, pred))
+            vol_targets[vol_idx].append((slice_idx, target_np))
+    
+    # Sort slices and stack into 3D volumes
+    dice_3d = {c: [] for c in range(1, num_classes)}
+    hd95_3d = {c: [] for c in range(1, num_classes)}
+    
+    print(f"[3D Eval] Computing 3D metrics for {len(vol_preds)} volumes...")
+    
+    for vol_idx in vol_preds.keys():
+        # Sort by slice index
+        preds_sorted = sorted(vol_preds[vol_idx], key=lambda x: x[0])
+        targets_sorted = sorted(vol_targets[vol_idx], key=lambda x: x[0])
+        
+        # Stack into 3D volume
+        pred_3d = np.stack([p[1] for p in preds_sorted], axis=0)  # (D, H, W)
+        target_3d = np.stack([t[1] for t in targets_sorted], axis=0)
+        
+        for c in range(1, num_classes):
+            pred_c = (pred_3d == c)
+            target_c = (target_3d == c)
+            
+            # 3D Dice
+            inter = (pred_c & target_c).sum()
+            dice = (2 * inter) / (pred_c.sum() + target_c.sum() + 1e-6)
+            dice_3d[c].append(dice)
+            
+            # 3D HD95
+            if pred_c.any() and target_c.any():
+                pred_dist = distance_transform_edt(~pred_c)
+                target_dist = distance_transform_edt(~target_c)
+                
+                # Surface distances
+                pred_border = pred_c ^ np.roll(pred_c, 1, axis=1)  # XY boundary
+                target_border = target_c ^ np.roll(target_c, 1, axis=1)
+                
+                if pred_border.any() and target_border.any():
+                    d1 = target_dist[pred_border]
+                    d2 = pred_dist[target_border]
+                    all_d = np.concatenate([d1, d2])
+                    hd95_3d[c].append(np.percentile(all_d, 95))
+    
+    # Aggregate
+    results = {
+        'mean_dice_3d': np.mean([np.mean(dice_3d[c]) for c in range(1, num_classes)]),
+        'per_class_dice_3d': {c: np.mean(dice_3d[c]) for c in range(1, num_classes)},
+        'mean_hd95_3d': np.mean([np.mean(hd95_3d[c]) if hd95_3d[c] else float('inf') for c in range(1, num_classes)]),
+        'per_class_hd95_3d': {c: np.mean(hd95_3d[c]) if hd95_3d[c] else float('inf') for c in range(1, num_classes)},
+        'num_volumes': len(vol_preds)
+    }
+    
+    print(f"[3D Eval] Volumes: {results['num_volumes']}")
+    print(f"[3D Eval] 3D Dice: {results['mean_dice_3d']:.4f}")
+    print(f"[3D Eval] 3D HD95: {results['mean_hd95_3d']:.2f}")
+    
+    return results
 
 
 def train_config(name, model, train_loader, val_loader, device, epochs=50, lr=1e-4):
