@@ -27,14 +27,37 @@ CLASS_MAP = {0: 'BG', 1: 'RV', 2: 'MYO', 3: 'LV'}
 
 class HRNetAdvanced(nn.Module):
     """HRNet with configurable block types and depths per stage."""
+class HRNetStem_FullRes(nn.Module):
+    """
+    Full Resolution Stem (stride=1) - keeps 224x224 throughout.
+    WARNING: Very high VRAM usage!
+    """
+    def __init__(self, in_ch=3, out_ch=64):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch // 2, 3, 1, 1, bias=False)  # stride=1
+        self.bn1 = nn.BatchNorm2d(out_ch // 2)
+        self.conv2 = nn.Conv2d(out_ch // 2, out_ch, 3, 1, 1, bias=False)  # stride=1
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        return x
+
+
+class HRNetAdvanced(nn.Module):
+    """HRNet with configurable block types and depths per stage."""
     
     def __init__(self, in_channels=3, base_channels=64, img_size=224,
-                 stage_configs=None, use_pointrend=False, num_classes=4):
+                 stage_configs=None, use_pointrend=False, num_classes=4,
+                 full_resolution_mode=False):
         """
         Args:
             stage_configs: List of stage configs, each is dict with:
                 - 'blocks': List of block types e.g. ['dcn', 'dcn'] or ['inverted_residual', 'dcn']
             use_pointrend: Whether to use PointRend for boundary refinement
+            full_resolution_mode: If True, keeps 224x224 (no downsample in stem). High VRAM!
         """
         super().__init__()
         
@@ -44,6 +67,7 @@ class HRNetAdvanced(nn.Module):
         
         self.get_block = get_block
         self.num_classes = num_classes
+        self.full_resolution_mode = full_resolution_mode
         
         # Default: asymmetric DCN
         if stage_configs is None:
@@ -55,8 +79,14 @@ class HRNetAdvanced(nn.Module):
         
         self.stage_configs = stage_configs
         
-        # Stem
-        self.stem = HRNetStem(in_channels, 64)
+        # Stem - Full Res or Normal
+        if full_resolution_mode:
+            print(">>> WARNING: FULL RESOLUTION MODE (224x224). High VRAM!")
+            self.stem = HRNetStem_FullRes(in_channels, 64)
+            s = img_size  # No downsample
+        else:
+            self.stem = HRNetStem(in_channels, 64)
+            s = img_size // 4  # Normal: 224 -> 56
         
         # Layer 1 (Bottleneck)
         self.layer1 = nn.Sequential(
@@ -69,7 +99,6 @@ class HRNetAdvanced(nn.Module):
         )
         
         C = base_channels
-        s = img_size // 4
         
         # Transitions and Stages
         self.transition1 = nn.ModuleList([
@@ -475,6 +504,18 @@ CONFIGS = {
         ],
         'use_pointrend': True
     },
+    
+    # EXPERIMENTAL: Full Resolution 224x224 (High VRAM!)
+    "Full Res DCN + PointRend": {
+        'stage_configs': [
+            {'blocks': ['dcn'] * 2},
+            {'blocks': ['dcn'] * 2},
+            {'blocks': ['dcn'] * 2},
+        ],
+        'use_pointrend': True,
+        'full_resolution_mode': True,
+        'base_channels': 16  # Reduced to fit in VRAM
+    },
 }
 
 
@@ -539,13 +580,18 @@ def main():
         torch.cuda.empty_cache()
         
         try:
+            # Get config-specific overrides
+            base_ch = cfg.get('base_channels', 64)
+            full_res = cfg.get('full_resolution_mode', False)
+            
             model = HRNetAdvanced(
                 in_channels=3,
-                base_channels=64,  
+                base_channels=base_ch,
                 img_size=224,
                 stage_configs=cfg['stage_configs'],
                 use_pointrend=cfg['use_pointrend'],
-                num_classes=4
+                num_classes=4,
+                full_resolution_mode=full_res
             ).to(device)
             
             metrics, params = train_config(name, model, train_loader, val_loader, device,
