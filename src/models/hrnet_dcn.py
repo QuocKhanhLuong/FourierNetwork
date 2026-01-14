@@ -139,7 +139,7 @@ class HRNetDCN(nn.Module):
     """
     
     def __init__(self, in_channels=3, num_classes=4, base_channels=64, img_size=224,
-                 stage_configs=None, use_pointrend=False, full_resolution_mode=False):
+                 stage_configs=None, use_pointrend=False, full_resolution_mode=True):
         super().__init__()
         
         self.num_classes = num_classes
