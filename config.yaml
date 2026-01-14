@@ -1,124 +1,88 @@
 # =============================================================================
-# EGM-Net / SpecMamba - Master Configuration File
+# SpecMamba - Master Configuration File
 # =============================================================================
-# This is the SINGLE SOURCE OF TRUTH for all training options.
-# All CLI args in train_acdc.py can be overridden via this config.
+# Unified config for all training scripts (train_acdc, train_mnm, train_brats, train_synapse)
 # =============================================================================
 
 # Quick preset - override individual settings below if needed
-# Options: baseline, lite, sota, bio, spectral, attention
+# Options: baseline, lite, sota
 preset: "sota"
 
 # =============================================================================
 # MODEL CONFIGURATION
 # =============================================================================
 model:
-  name: "EGMNet"
-  in_channels: 3              # 1=grayscale, 3=RGB
-  num_classes: 4              # ACDC: 0=BG, 1=RV, 2=MYO, 3=LV
-  img_size: 224               # Input image size
+  name: "HRNetDCN"               # "HRNetDCN" or "EGMNet" (legacy)
   
-  # HRNet Backbone
-  backbone:
-    type: "hrnet"             # "hrnet" or "simple"
-    base_channels: 64         # Channel width (32, 48, 64)
-    num_stages: 4             # Number of HRNet stages
-    blocks_per_stage: 2       # Blocks per stage
+  # Common settings
+  img_size: 224                  # Input image size
+  
+  # HRNet DCN Settings
+  hrnet_dcn:
+    base_channels: 48            # 32=small, 48=base, 64=large
+    use_pointrend: true          # PointRend for boundary refinement
+    full_resolution_mode: false  # Keep 224x224 (high VRAM)
     
-  # ==========================================================================
-  # BLOCK TYPE - Replaces basic blocks inside HRNet stages
-  # ==========================================================================
-  block:
-    # Available types:
-    #   - "basic"             : Standard residual block
-    #   - "convnext"          : ConvNeXt Block (SOTA CNN)
-    #   - "dcn"               : Deformable Conv v2 ★ RECOMMENDED
-    #   - "inverted_residual" : MobileNetV2 style (lightweight)
-    #   - "swin"              : Swin Transformer (attention)
-    #   - "fno"               : Fourier Neural Operator (spectral)
-    #   - "wavelet"           : Wavelet Transform Block
-    #   - "rwkv"              : RWKV Block (linear attention)
-    type: "dcn"
-    depth: 2                  # Default blocks per stage
-    
-    # Asymmetric block depths (2-4-6 pyramid)
-    asymmetric:
-      enabled: true
+    # Stage depths (asymmetric DCN)
+    stage_configs:
       stage2: 2
       stage3: 4
       stage4: 6
-    
-    # Dilation Pyramid for DCN (ASPP-style multi-scale)
+      
+    # Dilation Pyramid (HDC strategy)
     dilation_pyramid:
-      enabled: true           # Auto: [1, 2, 4, 8, 16, 32]
-    
-    # Block-specific settings
-    convnext:
-      drop_path: 0.1
-      layer_scale_init: 1e-6
-      
-    swin:
-      num_heads: 8
-      window_size: 7
-      mlp_ratio: 4.0
-      
-    fno:
-      modes: 16
-      mlp_ratio: 2.0
-      
-    mamba:
-      d_state: 16
-      d_conv: 4
-      expand: 2
-      
-  # Additional Components
-  components:
-    use_mamba: false          # Mamba SSM blocks (requires mamba-ssm)
-    use_spectral: false       # Spectral FFT processing
-    use_pointrend: true       # PointRend for boundary refinement
-    use_dog: true             # DoG preprocessing
+      enabled: true              # Auto: [1, 2, 4, 8, 16, 32]
 
 # =============================================================================
-# PREPROCESSING
+# DATASET CONFIGURATION
 # =============================================================================
-preprocessing:
-  # Difference of Gaussians (DoG) - Edge enhancement
-  dog:
-    enabled: true
-    scales: [[1.0, 2.0], [2.0, 4.0]]
-    kernel_size: 15
-    concat_original: true
+datasets:
+  # ACDC - Cardiac MRI
+  acdc:
+    in_channels: 3
+    num_classes: 4
+    class_names: ["BG", "RV", "MYO", "LV"]
+    root: "preprocessed_data/ACDC"
+    train_dir: "training"
+    test_dir: "testing"
+    
+  # M&M - Cardiac MRI (Multi-vendor)
+  mnm:
+    in_channels: 3
+    num_classes: 4
+    class_names: ["BG", "LV", "MYO", "RV"]
+    root: "preprocessed_data/MnM"
+    train_dir: "training"
+    test_dir: "testing"
+    
+  # BraTS21 - Brain Tumor MRI
+  brats:
+    in_channels: 4               # 4 modalities: T1, T1ce, T2, FLAIR
+    num_classes: 4
+    class_names: ["BG", "NCR", "ED", "ET"]
+    root: "preprocessed_data/BraTS21"
+    train_dir: "training"
+    test_dir: null               # Use train/val split
+    
+  # Synapse - Multi-organ CT
+  synapse:
+    in_channels: 3
+    num_classes: 14
+    class_names: ["BG", "Spleen", "R.Kidney", "L.Kidney", "Gallbladder",
+                  "Esophagus", "Liver", "Stomach", "Aorta", "IVC",
+                  "Portal Vein", "Pancreas", "R.AG", "L.AG"]
+    root: "preprocessed_data/Synapse"
+    train_dir: "training"
+    test_dir: "testing"
 
-# =============================================================================
-# SEGMENTATION HEADS
-# =============================================================================
-heads:
-  # Coarse Head (main segmentation output)
-  coarse:
-    type: "constellation"     # "constellation" (RBF), "linear", "conv"
-    enabled: true
-    embedding_dim: 2
-    init_gamma: 1.0
-    
-  # Fine Head (implicit refinement)
-  fine:
-    type: "shearlet"          # "gabor", "shearlet", "none"
-    enabled: true
-    hidden_dim: 256
-    num_layers: 4
-    num_frequencies: 64
-    use_energy_gating: true
-    
-  # Shearlet-specific
-  shearlet:
-    num_orientations: 8
-    num_frequencies: 4
-    hidden_dim: 256
-    
-  # Fusion method
-  fusion:
-    type: "energy_gated"      # "energy_gated", "average", "learned"
-    temperature: 1.0
+# Active dataset (override via CLI)
+data:
+  dataset: "acdc"
+  train_split: 0.8
+  seed: 42
+  use_memmap: true
+  max_cache: 10
+  pin_memory: true
 
 # =============================================================================
 # TRAINING CONFIGURATION
@@ -126,157 +90,77 @@ heads:
 training:
   # Basic
   epochs: 150
-  batch_size: 8
-  num_workers: 0
+  batch_size: 8                  # Reduce for BraTS (4 channels)
+  num_workers: 4
   
   # Optimizer
-  optimizer: "adamw"          # "adamw", "sgd", "adam"
+  optimizer: "adamw"
   learning_rate: 1e-4
   weight_decay: 1e-5
   
   # Scheduler
-  scheduler: "cosine"         # "cosine", "reduce_plateau", "step"
+  scheduler: "cosine"
   scheduler_params:
-    T_max: 150                # For cosine
+    T_max: 150
     eta_min: 1e-6
     
   # Training Techniques
   grad_clip: 1.0
-  use_amp: false              # Mixed precision (AMP)
-  early_stop: 30              # Epochs without improvement
+  use_amp: true                  # Mixed precision (recommended)
+  early_stop: 30
   
-  # SOTA Strategies
-  sota:
-    # Boundary Loss
-    boundary_loss: true
-    boundary_weight: 0.5
-    warmup_epochs: 10         # Warmup before adding boundary loss
-    
-    # Deep Supervision
-    deep_supervision: false
-    ds_weights: [1.0, 0.5, 0.25, 0.125]
-    
-  # Point Sampling (for fine head)
-  point_sampling:
-    enabled: false
-    num_samples: 4096
-    boundary_ratio: 0.5
-    jitter_scale: 0.01
-    strategy: "uncertainty_energy"
-    
-  # Augmentation
-  augmentation:
-    random_flip: true
-    random_rotation: true
-    rotation_range: 15
+  # Warmup
+  warmup_epochs: 10
 
 # =============================================================================
 # LOSS CONFIGURATION
 # =============================================================================
 loss:
-  # Loss weights
   ce_weight: 1.0
   dice_weight: 1.0
-  focal_weight: 0.0           # Set > 0 to enable focal loss
-  focal_gamma: 2.0
   boundary_weight: 0.5
-  consistency_weight: 0.1     # Multi-scale consistency
-  energy_weight: 0.5          # Energy gating loss
+  warmup_epochs: 10              # Boundary loss warmup
 
 # =============================================================================
 # EVALUATION CONFIGURATION
 # =============================================================================
 evaluation:
-  # Evaluation mode
-  mode: "3d"                  # "2d" (slice-wise) or "3d" (volumetric)
+  mode: "3d"                     # "2d" or "3d" volumetric
+  eval_interval: 5               # Evaluate every N epochs
   
-  # Test Time Augmentation (TTA)
+  # Test Time Augmentation
   tta:
-    enabled_val: false        # TTA for validation
-    enabled_test: true        # TTA for test
-    modes: 8                  # 4 or 8 augmentations
-    # 4x: flip + 3 rotations
-    # 8x: 4 rotations x (original + hflip)
-
-# =============================================================================
-# DATA CONFIGURATION
-# =============================================================================
-data:
-  # Dataset
-  dataset: "ACDC"             # "ACDC", "Synapse", "BRATS", etc.
-  root: "preprocessed_data/ACDC"
-  train_dir: "training"
-  test_dir: "testing"
-  
-  # Split
-  train_split: 0.8            # Train/Val split ratio
-  seed: 42                    # Random seed for reproducibility
-  
-  # Data loading
-  use_memmap: true            # Memory-mapped loading
-  max_cache: 10               # Max volumes in cache
-  pin_memory: true
+    enabled_val: false
+    enabled_test: true
+    modes: 8
 
 # =============================================================================
 # OUTPUT CONFIGURATION
 # =============================================================================
 output:
   save_dir: "weights"
-  exp_name: null              # Auto-generate if null
-  save_interval: 50           # Checkpoint every N epochs
-  save_last: true
+  exp_name: null                 # Auto-generate if null
   save_best: true
-  save_history: true          # Save training history
+  save_last: true
 
 # =============================================================================
-# LOGGING
-# =============================================================================
-logging:
-  level: "INFO"               # DEBUG, INFO, WARNING, ERROR
-  log_interval: 100           # Log every N batches
-  val_interval: 1             # Validate every N epochs
-  print_model_summary: true
-  tensorboard: false
-
-# =============================================================================
-# PRESETS REFERENCE
+# PRESETS
 # =============================================================================
 # baseline:
-#   block.type: "basic"
-#   preprocessing.dog.enabled: false
-#   heads.fine.enabled: false
-#   components.use_pointrend: false
-#   evaluation.mode: "2d"
-#   ~5M params, fast training
+#   model.hrnet_dcn.base_channels: 32
+#   model.hrnet_dcn.use_pointrend: false
+#   training.use_amp: false
+#   ~10M params
 #
 # lite:
-#   block.type: "inverted_residual"
-#   preprocessing.dog.enabled: false
-#   heads.fine.enabled: false
-#   ~3M params, mobile-friendly
+#   model.hrnet_dcn.base_channels: 32
+#   training.batch_size: 16
+#   ~10M params, fast training
 #
 # sota: ★ RECOMMENDED
-#   block.type: "dcn"
-#   block.asymmetric.enabled: true (2-4-6)
-#   block.dilation_pyramid.enabled: true
-#   components.use_pointrend: true
-#   training.sota.boundary_loss: true
-#   evaluation.mode: "3d"
+#   model.hrnet_dcn.base_channels: 48
+#   model.hrnet_dcn.use_pointrend: true
+#   loss.boundary_weight: 0.5
+#   training.use_amp: true
 #   ~25M params, best accuracy
-#
-# bio:
-#   block.type: "dcn"
-#   preprocessing.dog.enabled: true
-#   heads.fine.type: "shearlet"
-#   Biologically-inspired processing
-#
-# spectral:
-#   block.type: "fno"
-#   components.use_spectral: true
-#   Fourier-based processing
-#
-# attention:
-#   block.type: "swin"
-#   heads.fine.type: "gabor"
-#   Transformer-based attention
 # =============================================================================
