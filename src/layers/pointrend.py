@@ -120,6 +120,9 @@ class PointRend(nn.Module):
         refined_logits = coarse_up.clone()
         B, C, H, W = refined_logits.shape
         
+        # Ensure dtype match for AMP compatibility
+        point_logits = point_logits.to(refined_logits.dtype)
+        
         for b in range(B):
             for c in range(C):
                 refined_logits[b, c].view(-1).scatter_(
