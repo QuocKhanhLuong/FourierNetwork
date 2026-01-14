@@ -74,12 +74,12 @@ Input Image (H×W×C)
 
 ### 1. **Deformable Convolution v3 (DCN) with Dilation Pyramid**
 - **Learnable offsets & modulation** for adaptive receptive fields
-- **Hybrid Dilated Convolution (HDC)**: Dilation rates \`[1, 2, 4, 8, 16, 32]\` to avoid gridding artifacts
+- **Hybrid Dilated Convolution (HDC)**: Dilation rates `[1, 2, 4, 8, 16, 32]` to avoid gridding artifacts
 - **Projection shortcuts** for channel dimension changes
 
 ### 2. **HRNet Multi-Resolution Backbone**
 - **Parallel high-to-low resolution streams** maintained throughout
-- **Repeated multi-scale fusion** via \`FuseLayer\`
+- **Repeated multi-scale fusion** via `FuseLayer`
 - **Full resolution mode** option (stride=1 stem for maximum detail)
 
 ### 3. **Asymmetric Stage Depth**
@@ -102,20 +102,20 @@ Input Image (H×W×C)
 
 | Block Type         | Description                              | Use Case                      |
 |--------------------|------------------------------------------|-------------------------------|
-| \`basic\`            | Standard ResNet residual block           | Baseline comparison           |
-| \`convnext\`         | ConvNeXt block (SOTA CNN, 2022)          | Strong CNN baseline           |
-| \`dcn\`              | Deformable Conv v3 + Dilation Pyramid    | **Default for HDC-HRNet**     |
-| \`inverted_residual\`| MobileNetV2 inverted bottleneck          | Lightweight models            |
-| \`swin\`             | Swin Transformer with shifted windows    | Vision Transformer hybrid     |
-| \`fno\`              | Fourier Neural Operator block            | Global frequency processing   |
-| \`wavelet\`          | Haar Wavelet transform block             | Multi-resolution analysis     |
-| \`rwkv\`             | RWKV/AFT-style linear attention          | Efficient sequence modeling   |
+| `basic`            | Standard ResNet residual block           | Baseline comparison           |
+| `convnext`         | ConvNeXt block (SOTA CNN, 2022)          | Strong CNN baseline           |
+| `dcn`              | Deformable Conv v3 + Dilation Pyramid    | **Default for HDC-HRNet**     |
+| `inverted_residual`| MobileNetV2 inverted bottleneck          | Lightweight models            |
+| `swin`             | Swin Transformer with shifted windows    | Vision Transformer hybrid     |
+| `fno`              | Fourier Neural Operator block            | Global frequency processing   |
+| `wavelet`          | Haar Wavelet transform block             | Multi-resolution analysis     |
+| `rwkv`             | RWKV/AFT-style linear attention          | Efficient sequence modeling   |
 
 ---
 
 ## 🚀 Quick Start
 
-\`\`\`bash
+```bash
 # 1. Create Environment
 conda env create -f environment.yaml
 conda activate hdc-hrnet
@@ -128,13 +128,13 @@ python src/training/train_acdc.py
 
 # 4. Evaluate
 python src/evaluate.py --checkpoint results/best_model.pt --data_dir preprocessed_data/ACDC
-\`\`\`
+```
 
 ---
 
 ## 📁 Project Structure
 
-\`\`\`
+```
 HDC-HRNet/
 ├── src/
 │   ├── models/
@@ -175,13 +175,13 @@ HDC-HRNet/
 ├── config.yaml                  # Model configuration
 ├── environment.yaml             # Conda environment
 └── requirements.txt             # Pip requirements
-\`\`\`
+```
 
 ---
 
 ## ⚙️ Model Configurations
 
-\`\`\`python
+```python
 # Small (~10M params)
 model = hrnet_dcn_small(num_classes=4, in_channels=1)
 
@@ -207,18 +207,18 @@ model = HRNetDCN(
     deep_supervision=True,        # Auxiliary losses
     use_shearlet=False            # Shearlet implicit head
 )
-\`\`\`
+```
 
 ---
 
 ## 📊 Supported Datasets
 
-| Dataset  | Modality | Classes | Task                    |
-|----------|----------|---------|-------------------------|
-| **ACDC** | MRI      | 4       | Cardiac segmentation    |
-| **BraTS**| MRI      | 4       | Brain tumor segmentation|
-| **M&M**  | MRI      | 4       | Multi-center cardiac    |
-| **Synapse**| CT     | 14      | Multi-organ segmentation|
+| Dataset    | Modality | Classes | Task                     |
+|------------|----------|---------|--------------------------|
+| **ACDC**   | MRI      | 4       | Cardiac segmentation     |
+| **BraTS**  | MRI      | 4       | Brain tumor segmentation |
+| **M&M**    | MRI      | 4       | Multi-center cardiac     |
+| **Synapse**| CT       | 14      | Multi-organ segmentation |
 
 ---
 
@@ -235,7 +235,7 @@ model = HRNetDCN(
 
 - Python 3.10+
 - PyTorch >= 2.0
-- torchvision >= 0.15 (for \`deform_conv2d\`)
+- torchvision >= 0.15 (for `deform_conv2d`)
 - MONAI >= 1.2 (optional, for medical imaging utilities)
 - numpy, scipy, scikit-image
 
@@ -243,13 +243,13 @@ model = HRNetDCN(
 
 ## 📚 Citation
 
-\`\`\`bibtex
+```bibtex
 @article{hdc-hrnet2025,
   title={HDC-HRNet: Hierarchical Deformable Convolution High-Resolution Network for Medical Image Segmentation},
   author={Your Name},
   year={2025}
 }
-\`\`\`
+```
 
 ---
 
