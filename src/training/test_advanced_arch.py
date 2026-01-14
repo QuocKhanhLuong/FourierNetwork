@@ -610,7 +610,8 @@ def main():
     for name, res in sorted_results:
         if res['metrics']:
             m = res['metrics']
-            print(f"{name:<30} {res['params']:>12,} {m['mean_dice']:>8.4f} {m['mean_iou']:>8.4f} {m['mean_hd95']:>8.2f}")
+            iou = m.get('mean_iou', 0)  # May not exist in 3D eval
+            print(f"{name:<30} {res['params']:>12,} {m['mean_dice']:>8.4f} {iou:>8.4f} {m['mean_hd95']:>8.2f}")
         else:
             print(f"{name:<30} {'FAILED':>12}")
     
