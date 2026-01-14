@@ -14,20 +14,27 @@ if _src_dir not in sys.path:
 
 try:
     from layers.monogenic import EnergyMap, MonogenicSignal
-    from models.hrnet_mamba import HRNetV2MambaBackbone
     from layers.constellation_head import RBFConstellationHead
     from layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
     from layers.dog_retinal import RetinalLayer, DoGFilter
     from layers.shearlet_implicit import ShearletImplicitHead
-    from models.mamba_block import VSSBlock, MambaBlockStack
 except ImportError:
     from ..layers.monogenic import EnergyMap, MonogenicSignal
-    from .hrnet_mamba import HRNetV2MambaBackbone
     from ..layers.constellation_head import RBFConstellationHead
     from ..layers.gabor_implicit import EnergyGatedImplicitHead, GaborNet, ImplicitSegmentationHead
     from ..layers.dog_retinal import RetinalLayer, DoGFilter
     from ..layers.shearlet_implicit import ShearletImplicitHead
-    from .mamba_block import VSSBlock, MambaBlockStack
+
+# Optional mamba imports - these modules are deprecated
+try:
+    from .hrnet_dcn import HRNetStem, Bottleneck, FuseLayer
+    HRNetV2MambaBackbone = None  # Deprecated
+    VSSBlock = None
+    MambaBlockStack = None
+except ImportError:
+    HRNetV2MambaBackbone = None
+    VSSBlock = None
+    MambaBlockStack = None
 
 
 class EnergyGatedFusion(nn.Module):

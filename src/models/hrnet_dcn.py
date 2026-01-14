@@ -1,6 +1,6 @@
 """
 HRNet with Asymmetric DCN (Dilation Pyramid)
-Extracted from test_advanced_arch.py - production-ready model file
+Production-ready model file
 
 Features:
 - Asymmetric depth per stage (2,4,6 blocks)
@@ -14,8 +14,98 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .blocks import get_block
-from .hrnet_mamba import HRNetStem, Bottleneck, FuseLayer
 
+
+# =============================================================================
+# HRNet COMPONENTS
+# =============================================================================
+
+class HRNetStem(nn.Module):
+    """Standard HRNet stem with stride 4 (224 -> 56)."""
+    
+    def __init__(self, in_ch=3, out_ch=64):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, 64, 3, 2, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, out_ch, 3, 2, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        return x
+
+
+class Bottleneck(nn.Module):
+    """Bottleneck block for Layer1."""
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super().__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.downsample:
+            residual = self.downsample(x)
+        return self.relu(out + residual)
+
+
+class FuseLayer(nn.Module):
+    """Multi-scale feature fusion layer."""
+    
+    def __init__(self, in_channels_list, out_channels_list):
+        super().__init__()
+        self.num_in = len(in_channels_list)
+        self.num_out = len(out_channels_list)
+        self.fuse = nn.ModuleList()
+
+        for j in range(self.num_out):
+            fuse_j = nn.ModuleList()
+            for i in range(self.num_in):
+                if i == j:
+                    fuse_j.append(nn.Identity())
+                elif i < j:
+                    fuse_j.append(nn.Sequential(
+                        nn.Conv2d(in_channels_list[i], out_channels_list[j], 3, 2**(j-i), 1, bias=False),
+                        nn.BatchNorm2d(out_channels_list[j])
+                    ))
+                else:
+                    fuse_j.append(nn.Sequential(
+                        nn.Conv2d(in_channels_list[i], out_channels_list[j], 1, bias=False),
+                        nn.BatchNorm2d(out_channels_list[j]),
+                        nn.Upsample(scale_factor=2**(i-j), mode='bilinear', align_corners=True)
+                    ))
+            self.fuse.append(fuse_j)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x_list):
+        out = []
+        for j in range(self.num_out):
+            y = None
+            for i in range(self.num_in):
+                if y is None:
+                    y = self.fuse[j][i](x_list[i])
+                else:
+                    y = y + self.fuse[j][i](x_list[i])
+            out.append(self.relu(y))
+        return out
+
+
+# =============================================================================
+# FULL RESOLUTION STEM
+# =============================================================================
 
 class HRNetStemFullRes(nn.Module):
     """Full Resolution Stem (stride=1) - keeps 224x224 throughout. High VRAM!"""
