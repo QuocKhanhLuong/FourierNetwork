@@ -171,7 +171,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     
     if args.exp_name is None:
-        args.exp_name = f"acdc_{args.model}_c{args.base_channels}_{datetime.now().strftime('%m%d_%H%M')}"
+        args.exp_name = f"acdc_hrnet_c{args.base_channels}_{datetime.now().strftime('%m%d_%H%M')}"
     
     # Model
     num_classes = 4
