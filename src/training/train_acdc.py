@@ -41,6 +41,9 @@ def evaluate_3d(model, dataset, device, num_classes=4):
     
     dice_3d = {c: [] for c in range(1, num_classes)}
     hd95_3d = {c: [] for c in range(1, num_classes)}
+    prec_3d = {c: [] for c in range(1, num_classes)}
+    recall_3d = {c: [] for c in range(1, num_classes)}
+    acc_3d = {c: [] for c in range(1, num_classes)}
     
     for vol_idx in vol_preds.keys():
         pred_3d = np.stack([p[1] for p in sorted(vol_preds[vol_idx], key=lambda x: x[0])], axis=0)
@@ -49,9 +52,21 @@ def evaluate_3d(model, dataset, device, num_classes=4):
         for c in range(1, num_classes):
             pred_c = (pred_3d == c)
             target_c = (target_3d == c)
-            inter = (pred_c & target_c).sum()
-            dice = (2 * inter) / (pred_c.sum() + target_c.sum() + 1e-6)
+            
+            tp = (pred_c & target_c).sum()
+            fp = (pred_c & ~target_c).sum()
+            fn = (~pred_c & target_c).sum()
+            tn = (~pred_c & ~target_c).sum()
+            
+            dice = (2 * tp) / (2 * tp + fp + fn + 1e-6)
+            prec = (tp) / (tp + fp + 1e-6)
+            recall = (tp) / (tp + fn + 1e-6)
+            acc = (tp + tn) / (tp + tn + fp + fn + 1e-6)
+            
             dice_3d[c].append(dice)
+            prec_3d[c].append(prec)
+            recall_3d[c].append(recall)
+            acc_3d[c].append(acc)
             
             if pred_c.any() and target_c.any():
                 pred_border = pred_c ^ binary_erosion(pred_c)
@@ -68,7 +83,9 @@ def evaluate_3d(model, dataset, device, num_classes=4):
     return {
         'mean_dice': np.mean([np.mean(dice_3d[c]) for c in range(1, num_classes)]),
         'mean_hd95': np.mean([np.mean(hd95_3d[c]) for c in range(1, num_classes)]),
-        'per_class_dice': {CLASS_MAP[c]: np.mean(dice_3d[c]) for c in range(1, num_classes)}
+        'mean_prec': np.mean([np.mean(prec_3d[c]) for c in range(1, num_classes)]),
+        'mean_recall': np.mean([np.mean(recall_3d[c]) for c in range(1, num_classes)]),
+        'mean_acc': np.mean([np.mean(acc_3d[c]) for c in range(1, num_classes)]),
     }
 
 
@@ -255,7 +272,10 @@ def main():
         metrics = evaluate_3d(model, val_ds, device, num_classes)
         dice = metrics['mean_dice']
         hd95 = metrics['mean_hd95']
-        print(f"E{epoch+1:03d} | Loss: {loss:.4f} | 3D Dice: {dice:.4f} | HD95: {hd95:.2f}")
+        prec = metrics['mean_prec']
+        rec = metrics['mean_recall']
+        acc = metrics['mean_acc']
+        print(f"E{epoch+1:03d} | Loss: {loss:.4f} | Dice/F1: {dice:.4f} | HD95: {hd95:.2f} | Prec: {prec:.4f} | Rec: {rec:.4f} | Acc: {acc:.4f}")
         
         # Save best
         if dice > best_dice:
