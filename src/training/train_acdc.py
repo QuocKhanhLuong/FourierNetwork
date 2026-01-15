@@ -184,6 +184,9 @@ def main():
     parser.add_argument('--dice_weight', type=float, default=1.0)
     parser.add_argument('--ce_weight', type=float, default=1.0)
     parser.add_argument('--deep_supervision', action='store_true', help='Enable deep supervision')
+    parser.add_argument('--class_weights', type=str, default='0.1,1.5,1.5,1.0',
+                        help='Class weights for [BG,RV,MYO,LV]. Default: 0.1,1.5,1.5,1.0 (boost RV/MYO)')
+    parser.add_argument('--no_class_weights', action='store_true', help='Disable class weighting')
     
     # Evaluation - defaults to 3D + TTA
     parser.add_argument('--no_eval_3d', action='store_true', help='Disable 3D volumetric evaluation (use 2D)')
@@ -267,12 +270,21 @@ def main():
     print(f"Data:       Train={len(train_ds)} | Val={len(val_ds)} slices")
     
     # Loss & Optimizer
+    # Parse class weights
+    if args.no_class_weights:
+        class_weights = None
+        print(f"Class Weights: DISABLED")
+    else:
+        class_weights = [float(w) for w in args.class_weights.split(',')]
+        print(f"Class Weights: {class_weights} (BG, RV, MYO, LV)")
+    
     criterion = CombinedSOTALoss(
         num_classes=num_classes,
         ce_weight=args.ce_weight,
         dice_weight=args.dice_weight,
         boundary_weight=args.boundary_weight,
-        warmup_epochs=args.warmup_epochs
+        warmup_epochs=args.warmup_epochs,
+        class_weights=class_weights
     )
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)

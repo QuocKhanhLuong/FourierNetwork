@@ -13,14 +13,17 @@ from scipy.ndimage import distance_transform_edt
 
 
 class DiceLoss(nn.Module):
-    def __init__(self, smooth=1e-5):
+    def __init__(self, smooth=1e-5, class_weights=None):
         super().__init__()
         self.smooth = smooth
+        self.class_weights = class_weights  # Tensor of shape (num_classes,)
 
     def forward(self, pred, target):
         pred = torch.softmax(pred, dim=1)
+        num_classes = pred.shape[1]
+        
         if target.ndim == 3:
-            target = F.one_hot(target.long(), num_classes=pred.shape[1])
+            target = F.one_hot(target.long(), num_classes=num_classes)
             target = target.permute(0, 3, 1, 2).float()
         
         pred = pred.view(pred.shape[0], pred.shape[1], -1)
@@ -28,8 +31,17 @@ class DiceLoss(nn.Module):
         
         intersection = (pred * target).sum(dim=2)
         union = pred.sum(dim=2) + target.sum(dim=2)
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        return (1.0 - dice).mean()
+        dice_per_class = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        
+        # Apply class weights if provided
+        if self.class_weights is not None:
+            weights = self.class_weights.to(pred.device)
+            # Weighted mean across classes
+            dice_loss = 1.0 - dice_per_class
+            weighted_loss = (dice_loss * weights.view(1, -1)).sum(dim=1) / weights.sum()
+            return weighted_loss.mean()
+        else:
+            return (1.0 - dice_per_class).mean()
 
 
 class FocalLoss(nn.Module):
@@ -148,13 +160,14 @@ class DeepSupervisionLoss(nn.Module):
 
 
 class CombinedSOTALoss(nn.Module):
-    """Combined loss với warmup cho boundary"""
+    """Combined loss với warmup cho boundary và class weights (re-weighting)"""
     def __init__(self, num_classes=4, 
                  ce_weight=1.0, 
                  dice_weight=1.0, 
                  boundary_weight=0.5,
                  focal_weight=0.0,
-                 warmup_epochs=10):
+                 warmup_epochs=10,
+                 class_weights=None):
         super().__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
@@ -162,9 +175,17 @@ class CombinedSOTALoss(nn.Module):
         self.focal_weight = focal_weight
         self.warmup_epochs = warmup_epochs
         self.current_epoch = 0
+        self.num_classes = num_classes
         
-        self.ce = nn.CrossEntropyLoss()
-        self.dice = DiceLoss()
+        # Class weights for re-weighting (e.g., [0.1, 1.5, 1.5, 1.0] for [BG, RV, MYO, LV])
+        if class_weights is not None:
+            self.register_buffer('class_weights', torch.tensor(class_weights, dtype=torch.float32))
+        else:
+            self.class_weights = None
+        
+        # Initialize losses with class weights
+        self.ce = nn.CrossEntropyLoss(weight=self.class_weights if class_weights else None)
+        self.dice = DiceLoss(class_weights=self.class_weights if class_weights else None)
         self.boundary = BoundaryAwareLoss()
         self.focal = FocalLoss() if focal_weight > 0 else None
 
