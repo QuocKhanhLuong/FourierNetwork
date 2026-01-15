@@ -16,6 +16,27 @@ import torch.nn.functional as F
 from .blocks import get_block
 
 
+# =============================================================================
+# NORMALIZATION HELPER
+# =============================================================================
+
+def get_norm(num_channels, num_groups=8):
+    """
+    Get normalization layer. Uses GroupNorm for stability with small batch sizes.
+    
+    For medical imaging with BS < 8, GroupNorm is much more stable than BatchNorm.
+    Falls back to InstanceNorm (groups=1) if channels < num_groups.
+    
+    Args:
+        num_channels: Number of input channels
+        num_groups: Number of groups for GroupNorm (default: 8)
+    """
+    if num_channels < num_groups:
+        # InstanceNorm-like behavior for very small channel counts
+        return nn.GroupNorm(num_groups=1, num_channels=num_channels)
+    return nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)
+
+
 
 
 class HRNetStem(nn.Module):
@@ -24,9 +45,9 @@ class HRNetStem(nn.Module):
     def __init__(self, in_ch=3, out_ch=64):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, 64, 3, 2, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.bn1 = get_norm(64)
         self.conv2 = nn.Conv2d(64, out_ch, 3, 2, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.bn2 = get_norm(out_ch)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -42,11 +63,11 @@ class Bottleneck(nn.Module):
     def __init__(self, inplanes, planes, stride=1, downsample=None):
         super().__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
+        self.bn1 = get_norm(planes)
         self.conv2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
+        self.bn2 = get_norm(planes)
         self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.bn3 = get_norm(planes * self.expansion)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
 
@@ -55,7 +76,7 @@ class Bottleneck(nn.Module):
         out = self.relu(self.bn1(self.conv1(x)))
         out = self.relu(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
-        if self.downsample:
+        if self.downsample is not None:
             residual = self.downsample(x)
         return self.relu(out + residual)
 
@@ -77,12 +98,12 @@ class FuseLayer(nn.Module):
                 elif i < j:
                     fuse_j.append(nn.Sequential(
                         nn.Conv2d(in_channels_list[i], out_channels_list[j], 3, 2**(j-i), 1, bias=False),
-                        nn.BatchNorm2d(out_channels_list[j])
+                        get_norm(out_channels_list[j])
                     ))
                 else:
                     fuse_j.append(nn.Sequential(
                         nn.Conv2d(in_channels_list[i], out_channels_list[j], 1, bias=False),
-                        nn.BatchNorm2d(out_channels_list[j]),
+                        get_norm(out_channels_list[j]),
                         nn.Upsample(scale_factor=2**(i-j), mode='bilinear', align_corners=True)
                     ))
             self.fuse.append(fuse_j)
@@ -111,9 +132,9 @@ class HRNetStemFullRes(nn.Module):
     def __init__(self, in_ch=3, out_ch=64):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, out_ch // 2, 3, 1, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_ch // 2)
+        self.bn1 = get_norm(out_ch // 2)
         self.conv2 = nn.Conv2d(out_ch // 2, out_ch, 3, 1, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.bn2 = get_norm(out_ch)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -155,7 +176,7 @@ class HRNetDCN(nn.Module):
         # Layer 1 (Bottleneck)
         self.layer1 = nn.Sequential(
             Bottleneck(64, 64, downsample=nn.Sequential(
-                nn.Conv2d(64, 256, 1, bias=False), nn.BatchNorm2d(256)
+                nn.Conv2d(64, 256, 1, bias=False), get_norm(256)
             )),
             Bottleneck(256, 64),
             Bottleneck(256, 64),
@@ -166,8 +187,8 @@ class HRNetDCN(nn.Module):
         
         # Transitions and Stages
         self.transition1 = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(256, C, 3, 1, 1, bias=False), nn.BatchNorm2d(C), nn.ReLU(True)),
-            nn.Sequential(nn.Conv2d(256, C*2, 3, 2, 1, bias=False), nn.BatchNorm2d(C*2), nn.ReLU(True))
+            nn.Sequential(nn.Conv2d(256, C, 3, 1, 1, bias=False), get_norm(C), nn.ReLU(True)),
+            nn.Sequential(nn.Conv2d(256, C*2, 3, 2, 1, bias=False), get_norm(C*2), nn.ReLU(True))
         ])
         
         self.stage2 = self._make_stage([C, C*2], stage_configs[0]['blocks'], [(s, s), (s//2, s//2)])
@@ -175,7 +196,7 @@ class HRNetDCN(nn.Module):
         self.transition2 = nn.ModuleList([
             nn.Identity(),
             nn.Identity(),
-            nn.Sequential(nn.Conv2d(C*2, C*4, 3, 2, 1, bias=False), nn.BatchNorm2d(C*4), nn.ReLU(True))
+            nn.Sequential(nn.Conv2d(C*2, C*4, 3, 2, 1, bias=False), get_norm(C*4), nn.ReLU(True))
         ])
         
         self.stage3 = self._make_stage([C, C*2, C*4], stage_configs[1]['blocks'], 
@@ -185,7 +206,7 @@ class HRNetDCN(nn.Module):
             nn.Identity(),
             nn.Identity(),
             nn.Identity(),
-            nn.Sequential(nn.Conv2d(C*4, C*8, 3, 2, 1, bias=False), nn.BatchNorm2d(C*8), nn.ReLU(True))
+            nn.Sequential(nn.Conv2d(C*4, C*8, 3, 2, 1, bias=False), get_norm(C*8), nn.ReLU(True))
         ])
         
         self.stage4 = self._make_stage([C, C*2, C*4, C*8], stage_configs[2]['blocks'],

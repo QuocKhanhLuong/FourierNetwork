@@ -105,14 +105,14 @@ class DeformableConvBlock(nn.Module):
             dilation=dilation, bias=True
         )
         
-        self.norm = nn.BatchNorm2d(self.out_dim)
+        self.norm = nn.GroupNorm(num_groups=8 if self.out_dim >= 8 else 1, num_channels=self.out_dim)
         self.act = nn.GELU()
         
         # Shortcut projection for channel mismatch
         if self.in_dim != self.out_dim:
             self.shortcut_proj = nn.Sequential(
                 nn.Conv2d(self.in_dim, self.out_dim, kernel_size=1, bias=False),
-                nn.BatchNorm2d(self.out_dim)
+                nn.GroupNorm(num_groups=8 if self.out_dim >= 8 else 1, num_channels=self.out_dim)
             )
         else:
             self.shortcut_proj = nn.Identity()
@@ -154,13 +154,13 @@ class InvertedResidualBlock(nn.Module):
         
         self.conv = nn.Sequential(
             nn.Conv2d(dim, hidden_dim, 1, bias=False),
-            nn.BatchNorm2d(hidden_dim),
+            nn.GroupNorm(num_groups=8 if hidden_dim >= 8 else 1, num_channels=hidden_dim),
             nn.SiLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1, groups=hidden_dim, bias=False),
-            nn.BatchNorm2d(hidden_dim),
+            nn.GroupNorm(num_groups=8 if hidden_dim >= 8 else 1, num_channels=hidden_dim),
             nn.SiLU(inplace=True),
             nn.Conv2d(hidden_dim, dim, 1, bias=False),
-            nn.BatchNorm2d(dim)
+            nn.GroupNorm(num_groups=8 if dim >= 8 else 1, num_channels=dim)
         )
 
     def forward(self, x):
@@ -499,9 +499,9 @@ def get_block(block_type: str, dim: int, **kwargs):
         def __init__(self, dim):
             super().__init__()
             self.conv1 = nn.Conv2d(dim, dim, 3, 1, 1, bias=False)
-            self.bn1 = nn.BatchNorm2d(dim)
+            self.bn1 = nn.GroupNorm(num_groups=8 if dim >= 8 else 1, num_channels=dim)
             self.conv2 = nn.Conv2d(dim, dim, 3, 1, 1, bias=False)
-            self.bn2 = nn.BatchNorm2d(dim)
+            self.bn2 = nn.GroupNorm(num_groups=8 if dim >= 8 else 1, num_channels=dim)
             self.relu = nn.ReLU(inplace=True)
         
         def forward(self, x):
